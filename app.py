@@ -39,9 +39,10 @@ HEADERS = {
 EMAIL_REGEX = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 PHONE_REGEX = r"(?:\+39\s?)?(?:0\d{1,4}[\s.-]?\d{5,8}|3\d{2}[\s.-]?\d{6,7})"
 PIVA_CONTEXT_REGEX = (
-    r"(?:p\.?\s*iva|partita\s*iva|p\.?\s*i\.?|vat|c\.?\s*f\.?\s*/\s*p\.?\s*iva)"
-    r"[\s:.\-]*(?:IT)?\s*(\d{11})\b"
+    r"(?:p\.?\s*i\.?\s*v\.?\s*a\.?|partita\s*iva|p\.?\s*i\.?|vat|c\.?\s*f\.?\s*(?:e|/|-)\s*p\.?\s*i(?:va)?)"
+    r"[\s:.\-n°]*(?:IT)?\s*(\d[\d\s.\-]{9,13}\d)\b"
 )
+PIVA_IT_REGEX = r"\bIT[\s.\-]?(\d{11})\b"
 CF_ALPHA_REGEX = r"\b([A-Z]{6}\d{2}[A-EHLMPR-T]\d{2}[A-Z]\d{3}[A-Z])\b"
 CF_CONTEXT_REGEX = (
     r"(?:c\.?\s*f\.?|codice\s*fiscale|cod\.?\s*fisc\.?)"
@@ -154,21 +155,32 @@ def estrai_contatti_da_testo(testo):
 
 
 def estrai_dati_fiscali_da_testo(testo):
-    """Estrae P.IVA (11 cifre validate) e Codice Fiscale (16 caratteri o 11 cifre) dal testo."""
+    """Estrae P.IVA (11 cifre validate) e Codice Fiscale dal testo, gestendo spazi e prefissi IT."""
     pive = set()
     cfs = set()
 
     if not testo:
         return pive, cfs
 
-    for match in re.findall(PIVA_CONTEXT_REGEX, testo, flags=re.IGNORECASE):
+    testo_norm = re.sub(r"[\xa0\u200b]+", " ", testo)
+
+    # 1. P.IVA con contesto esplicito (anche con spazi interni tra le cifre)
+    for match in re.findall(PIVA_CONTEXT_REGEX, testo_norm, flags=re.IGNORECASE):
+        solo_cifre = re.sub(r"\D", "", match)
+        if valida_piva(solo_cifre):
+            pive.add(solo_cifre)
+
+    # 2. P.IVA con prefisso "IT" (es. IT01234567890)
+    for match in re.findall(PIVA_IT_REGEX, testo_norm, flags=re.IGNORECASE):
         if valida_piva(match):
             pive.add(match)
 
-    for match in re.findall(CF_ALPHA_REGEX, testo.upper()):
+    # 3. Codice Fiscale alfanumerico (16 caratteri)
+    for match in re.findall(CF_ALPHA_REGEX, testo_norm.upper()):
         cfs.add(match)
 
-    for match in re.findall(CF_CONTEXT_REGEX, testo, flags=re.IGNORECASE):
+    # 4. Codice Fiscale con contesto esplicito
+    for match in re.findall(CF_CONTEXT_REGEX, testo_norm, flags=re.IGNORECASE):
         val = match.upper()
         if re.fullmatch(r"[A-Z]{6}\d{2}[A-EHLMPR-T]\d{2}[A-Z]\d{3}[A-Z]", val):
             cfs.add(val)
@@ -228,12 +240,10 @@ def formatta_foglio_excel(ws):
     max_width_cap = 55
     min_width = 14
 
-    # 1. Calcola larghezza ottimale per ogni colonna e applica allineamento/wrap
     for col_idx, col_cells in enumerate(ws.columns, start=1):
         max_len = 0
         for row_idx, cell in enumerate(col_cells, start=1):
             val = "" if cell.value is None else str(cell.value)
-            # Considera la riga più lunga in caso di testo multilinea
             lunghezza_riga = max((len(r) for r in val.split("\n")), default=0)
             if lunghezza_riga > max_len:
                 max_len = lunghezza_riga
@@ -251,7 +261,6 @@ def formatta_foglio_excel(ws):
         ws.column_dimensions[col_letter].width = larghezza
         larghezze_colonne[col_idx] = larghezza
 
-    # 2. Calcola altezza ottimale per ogni riga in base al testo a capo
     for row_idx, row_cells in enumerate(ws.iter_rows(), start=1):
         max_righe = 1
         for col_idx, cell in enumerate(row_cells, start=1):
@@ -586,24 +595,55 @@ def cerca_su_duckduckgo_web(nome_azienda, localita=""):
 
 
 def cerca_piva_cf_dedicata(nome_azienda, localita=""):
-    """Ricerca mirata di P.IVA e C.F. su DuckDuckGo se non ancora trovati."""
+    """Ricerca avanzata di P.IVA e C.F. su registri camerali italiani, snippet, URL e pagine web."""
     pive = set()
     cfs = set()
-    query = (
-        f'"{nome_azienda}" {localita} "partita iva" OR "p.iva" OR "codice fiscale"'
-        if localita
-        else f'"{nome_azienda}" "partita iva" OR "p.iva" OR "codice fiscale"'
+    nome_pulito = pulisci_nome_azienda(nome_azienda)
+
+    portali = (
+        "site:ufficiocamerale.it OR site:reportaziende.it OR "
+        "site:fatturatoitalia.it OR site:informazione-aziende.it OR "
+        "site:registroaziende.it OR site:aziende.it"
     )
-    try:
-        with DDGS() as ddgs:
-            items = list(ddgs.text(query, region="it-it", max_results=5))
-        for item in items:
-            snippet = item.get("title", "") + " " + item.get("body", "")
-            p, c = estrai_dati_fiscali_da_testo(snippet)
-            pive.update(p)
-            cfs.update(c)
-    except Exception:
-        pass
+    query_portali = f"{nome_pulito} {localita} ({portali})".strip()
+    query_ampia = f"{nome_pulito} {localita} partita iva codice fiscale".strip()
+
+    for query in (query_portali, query_ampia):
+        try:
+            with DDGS() as ddgs:
+                items = list(ddgs.text(query, region="it-it", max_results=6))
+
+            link_da_visitare = []
+            for item in items:
+                link = item.get("href", "")
+                snippet = item.get("title", "") + " " + item.get("body", "")
+
+                p, c = estrai_dati_fiscali_da_testo(snippet)
+                pive.update(p)
+                cfs.update(c)
+
+                for num in re.findall(r"(?<!\d)(\d{11})(?!\d)", link):
+                    if valida_piva(num):
+                        pive.add(num)
+
+                if link:
+                    link_da_visitare.append(link)
+
+            if not pive:
+                for link in link_da_visitare[:3]:
+                    _, _, p_pag, c_pag = visita_e_estrai(link)
+                    pive.update(p_pag)
+                    cfs.update(c_pag)
+                    if pive:
+                        break
+
+            if pive:
+                break
+
+            time.sleep(0.8)
+        except Exception:
+            pass
+
     return pive, cfs
 
 
@@ -824,8 +864,6 @@ if uploaded_file is not None:
                 else:
                     email_sito = ""
 
-                dati_maps["Email_Sito"] = email_sito
-
                 if not dati_maps["Telefono_Maps"] or not email_sito:
                     dati_web, pive_web, cf_web = cerca_su_duckduckgo_web(
                         azienda, loc_effettiva
@@ -850,7 +888,7 @@ if uploaded_file is not None:
                     )
                     time.sleep(0.2)
 
-                if not pive_trovate and not cf_trovati:
+                if not pive_trovate:
                     pive_ded, cf_ded = cerca_piva_cf_dedicata(azienda, loc_effettiva)
                     pive_trovate.update(pive_ded)
                     cf_trovati.update(cf_ded)
@@ -858,6 +896,8 @@ if uploaded_file is not None:
 
                 piva_str = ", ".join(sorted(pive_trovate))
                 cf_str = ", ".join(sorted(cf_trovati)) if cf_trovati else piva_str
+
+                # Integra Email_Sito ed Email_Web in un unico campo Email
                 email_unificata = unisci_valori(
                     email_sito, dati_maps.get("Email_Web", ""), lowercase=True
                 )
@@ -879,10 +919,11 @@ if uploaded_file is not None:
                 )
                 riga_output["Trovato"] = dati_maps["Trovato_Maps"]
 
+                # Esclude i campi già integrati/interni dal dizionario di dettaglio
                 dati_maps_puliti = {
                     k: v
                     for k, v in dati_maps.items()
-                    if k not in ("Citta_Maps", "Trovato_Maps")
+                    if k not in ("Citta_Maps", "Trovato_Maps", "Email_Web", "Email_Sito")
                 }
                 riga_output.update(dati_maps_puliti)
                 righe_finali.append(riga_output)

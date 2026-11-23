@@ -1,5 +1,6 @@
 import io
 import json
+import math
 import os
 import re
 import time
@@ -14,6 +15,8 @@ from bs4 import BeautifulSoup
 from ddgs import DDGS
 from google import genai
 from google.genai import types
+from openpyxl.styles import Alignment, Font
+from openpyxl.utils import get_column_letter
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -92,7 +95,7 @@ def render_header():
 
 
 # ==========================================
-# FUNZIONI DI SUPPORTO, PULIZIA E VALIDAZIONE
+# FUNZIONI DI SUPPORTO, PULIZIA E FORMATTAZIONE
 # ==========================================
 def pulisci_nome_azienda(nome):
     """Rimuove le forme giuridiche (SRL, SNC, SPA, ecc.) che ostacolano la ricerca."""
@@ -175,16 +178,21 @@ def estrai_dati_fiscali_da_testo(testo):
     return pive, cfs
 
 
-def unisci_email(email_sito, email_web):
-    """Unisce le email trovate dal sito e dal web rimuovendo eventuali duplicati."""
-    insieme = set()
-    for campo in (email_sito, email_web):
-        if campo:
-            for e in str(campo).split(","):
-                e_pulita = e.strip().lower()
-                if e_pulita:
-                    insieme.add(e_pulita)
-    return ", ".join(sorted(insieme))
+def unisci_valori(*campi, lowercase=False):
+    """Unisce valori separati da virgola rimuovendo duplicati e spazi superflui."""
+    insieme = []
+    visti = set()
+    for campo in campi:
+        if campo and not pd.isna(campo):
+            for item in str(campo).split(","):
+                val = item.strip()
+                if not val:
+                    continue
+                chiave = val.lower() if lowercase else re.sub(r"[\s.-]", "", val)
+                if chiave not in visti:
+                    visti.add(chiave)
+                    insieme.append(val.lower() if lowercase else val)
+    return ", ".join(insieme)
 
 
 def formatta_tempo(secondi):
@@ -212,6 +220,53 @@ def nomi_omonimi(nome_cercato, nome_trovato):
         return False
     overlap = len(token_a & token_b) / len(token_a)
     return overlap >= 0.75
+
+
+def formatta_foglio_excel(ws):
+    """Adatta automaticamente larghezza colonne e altezza righe al contenuto."""
+    larghezze_colonne = {}
+    max_width_cap = 55
+    min_width = 14
+
+    # 1. Calcola larghezza ottimale per ogni colonna e applica allineamento/wrap
+    for col_idx, col_cells in enumerate(ws.columns, start=1):
+        max_len = 0
+        for row_idx, cell in enumerate(col_cells, start=1):
+            val = "" if cell.value is None else str(cell.value)
+            # Considera la riga più lunga in caso di testo multilinea
+            lunghezza_riga = max((len(r) for r in val.split("\n")), default=0)
+            if lunghezza_riga > max_len:
+                max_len = lunghezza_riga
+
+            cell.alignment = Alignment(
+                wrap_text=True,
+                vertical="center",
+                horizontal="left",
+            )
+            if row_idx == 1:
+                cell.font = Font(bold=True)
+
+        larghezza = min(max(max_len + 4, min_width), max_width_cap)
+        col_letter = get_column_letter(col_idx)
+        ws.column_dimensions[col_letter].width = larghezza
+        larghezze_colonne[col_idx] = larghezza
+
+    # 2. Calcola altezza ottimale per ogni riga in base al testo a capo
+    for row_idx, row_cells in enumerate(ws.iter_rows(), start=1):
+        max_righe = 1
+        for col_idx, cell in enumerate(row_cells, start=1):
+            val = "" if cell.value is None else str(cell.value)
+            if not val:
+                continue
+            col_w = max(larghezze_colonne.get(col_idx, min_width) - 2, 10)
+            righe_cella = 0
+            for paragrafo in val.split("\n"):
+                righe_cella += max(1, math.ceil(len(paragrafo) / col_w))
+            if righe_cella > max_righe:
+                max_righe = righe_cella
+
+        altezza_base = 24 if row_idx == 1 else 20
+        ws.row_dimensions[row_idx].height = max(altezza_base, max_righe * 17 + 6)
 
 
 # ==========================================
@@ -803,13 +858,19 @@ if uploaded_file is not None:
 
                 piva_str = ", ".join(sorted(pive_trovate))
                 cf_str = ", ".join(sorted(cf_trovati)) if cf_trovati else piva_str
-                email_unificata = unisci_email(
-                    email_sito, dati_maps.get("Email_Web", "")
+                email_unificata = unisci_valori(
+                    email_sito, dati_maps.get("Email_Web", ""), lowercase=True
+                )
+                telefono_unificato = unisci_valori(
+                    dati_maps.get("Telefono_Maps", ""),
+                    dati_maps.get("Telefono_Web", ""),
+                    lowercase=False,
                 )
 
                 riga_output = row.to_dict()
                 riga_output["P.IVA"] = piva_str
                 riga_output["C.F."] = cf_str
+                riga_output["Telefono"] = telefono_unificato
                 riga_output["Email"] = email_unificata
                 riga_output["Omonimia"] = (
                     f"Sì ({pos_omonimo} di {num_candidati})"
@@ -841,6 +902,7 @@ if uploaded_file is not None:
             "Azienda",
             "P.IVA",
             "C.F.",
+            "Telefono",
             "Sito_Web",
             "Email",
             "Omonimia",
@@ -848,17 +910,21 @@ if uploaded_file is not None:
         ]
         df_foglio1 = df_completo[colonne_foglio1].copy()
 
-        # Nel secondo foglio inserisce 'Azienda' come riferimento + tutte le altre colonne
-        colonne_foglio2 = ["Azienda"] + [
+        # Nel secondo foglio inserisce 'Azienda', 'P.IVA' e 'C.F.' + tutte le altre colonne
+        colonne_foglio2 = ["Azienda", "P.IVA", "C.F."] + [
             c for c in df_completo.columns if c not in colonne_foglio1
         ]
         df_foglio2 = df_completo[colonne_foglio2].copy()
 
-        # Esportazione Excel multi-foglio in memoria
+        # Esportazione Excel multi-foglio con adattamento automatico celle
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             df_foglio1.to_excel(writer, sheet_name="Sintesi", index=False)
             df_foglio2.to_excel(writer, sheet_name="Dettagli", index=False)
+
+            formatta_foglio_excel(writer.sheets["Sintesi"])
+            formatta_foglio_excel(writer.sheets["Dettagli"])
+
         buffer.seek(0)
 
         st.session_state.df_foglio1 = df_foglio1

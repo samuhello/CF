@@ -175,6 +175,18 @@ def estrai_dati_fiscali_da_testo(testo):
     return pive, cfs
 
 
+def unisci_email(email_sito, email_web):
+    """Unisce le email trovate dal sito e dal web rimuovendo eventuali duplicati."""
+    insieme = set()
+    for campo in (email_sito, email_web):
+        if campo:
+            for e in str(campo).split(","):
+                e_pulita = e.strip().lower()
+                if e_pulita:
+                    insieme.add(e_pulita)
+    return ", ".join(sorted(insieme))
+
+
 def formatta_tempo(secondi):
     secondi = max(0, int(round(secondi)))
     ore, resto = divmod(secondi, 3600)
@@ -203,12 +215,12 @@ def nomi_omonimi(nome_cercato, nome_trovato):
 
 
 # ==========================================
-# ESTRAZIONE NOMINATIVI DA IMMAGINI (GEMINI)
+# ESTRAZIONE NOMINATIVI DA IMMAGINI E PDF (GEMINI)
 # ==========================================
-def estrai_aziende_da_immagine(file_bytes, mime_type, gemini_api_key):
+def estrai_aziende_da_documento(file_bytes, mime_type, gemini_api_key):
     client = genai.Client(api_key=gemini_api_key)
     prompt = (
-        "Estrai tutti i nomi di aziende/imprese presenti in questa immagine. "
+        "Estrai tutti i nomi di aziende/imprese presenti in questo documento o immagine. "
         "Se accanto al nome dell'azienda è indicata anche una città o località, estraila. "
         "Restituisci ESCLUSIVAMENTE un array JSON valido di oggetti con chiavi "
         "'Azienda' e 'Localita' (stringa vuota se non presente). "
@@ -286,13 +298,11 @@ def cerca_su_google_places(nome_azienda, localita="", api_key=""):
         if not places:
             return risultato_vuoto
 
-        # Filtra i risultati che sono effettivamente omonimi rispetto al nome cercato
         candidati = [
             p
             for p in places
             if nomi_omonimi(nome_azienda, p.get("displayName", {}).get("text", ""))
         ]
-        # Se nessuno supera il filtro stretto, mantiene comunque il primo risultato (comportamento originale)
         if not candidati:
             candidati = [places[0]]
 
@@ -357,14 +367,12 @@ def estrai_dati_da_sito(url_sito):
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # 1. Link mailto
                 for a in soup.find_all("a", href=True):
                     if a["href"].startswith("mailto:"):
                         mail = a["href"].replace("mailto:", "").split("?")[0].strip()
                         if "@" in mail and not mail.lower().endswith(ESTENSIONI_ESCLUSE):
                             emails_trovate.add(mail.lower())
 
-                # 2. Pattern testuali (email + P.IVA / CF)
                 testo = soup.get_text(" ")
                 em_testo, _ = estrai_contatti_da_testo(testo)
                 emails_trovate.update(em_testo)
@@ -549,7 +557,6 @@ def cerca_piva_cf_dedicata(nome_azienda, localita=""):
 # ==========================================
 render_header()
 
-# Inizializzazione stato sessione (l'API key viene richiesta a ogni nuova apertura)
 if "api_confermata" not in st.session_state:
     st.session_state.api_confermata = False
 if "places_api_key" not in st.session_state:
@@ -560,8 +567,10 @@ if "risultato_excel" not in st.session_state:
     st.session_state.risultato_excel = None
 if "nome_file_output" not in st.session_state:
     st.session_state.nome_file_output = ""
-if "df_finale" not in st.session_state:
-    st.session_state.df_finale = None
+if "df_foglio1" not in st.session_state:
+    st.session_state.df_foglio1 = None
+if "df_foglio2" not in st.session_state:
+    st.session_state.df_foglio2 = None
 
 # ------------------------------------------
 # STEP 1: RICHIESTA API KEY ALL'APERTURA
@@ -580,13 +589,13 @@ if not st.session_state.api_confermata:
             placeholder="AIza...",
         )
         usa_stessa_key = st.checkbox(
-            "Usa la stessa API Key anche per Gemini (lettura file PNG/JPG/JPEG)",
+            "Usa la stessa API Key anche per Gemini (lettura file PNG/JPG/JPEG/PDF)",
             value=True,
         )
         gemini_key = ""
         if not usa_stessa_key:
             gemini_key = st.text_input(
-                "Gemini API Key (opzionale, richiesta solo per immagini PNG/JPG/JPEG)",
+                "Gemini API Key (opzionale, richiesta solo per immagini e PDF)",
                 type="password",
                 placeholder="AIza...",
             )
@@ -605,7 +614,6 @@ if not st.session_state.api_confermata:
 
     st.stop()
 
-# Barra superiore per cambiare API Key in qualsiasi momento
 col_info, col_reset = st.columns([5, 1])
 with col_info:
     st.success("API Key attiva per questa sessione.")
@@ -615,7 +623,8 @@ with col_reset:
         st.session_state.places_api_key = ""
         st.session_state.gemini_api_key = ""
         st.session_state.risultato_excel = None
-        st.session_state.df_finale = None
+        st.session_state.df_foglio1 = None
+        st.session_state.df_foglio2 = None
         st.rerun()
 
 # ------------------------------------------
@@ -623,8 +632,8 @@ with col_reset:
 # ------------------------------------------
 uploaded_file = st.file_uploader(
     "Carica file",
-    type=["png", "jpg", "jpeg", "csv", "xlsx", "xls"],
-    help="Formati supportati: PNG, JPG, JPEG, CSV, XLSX",
+    type=["png", "jpg", "jpeg", "pdf", "csv", "xlsx", "xls"],
+    help="Formati supportati: PNG, JPG, JPEG, PDF, CSV, XLSX, XLS",
 )
 
 if uploaded_file is not None:
@@ -640,23 +649,24 @@ if uploaded_file is not None:
             df_input = pd.read_excel(uploaded_file)
         elif ext == ".csv":
             df_input = pd.read_csv(uploaded_file)
-        elif ext in [".png", ".jpg", ".jpeg"]:
+        elif ext in [".png", ".jpg", ".jpeg", ".pdf"]:
             if not st.session_state.gemini_api_key:
                 st.error(
-                    "Per leggere file immagine (PNG/JPG/JPEG) è necessaria una "
+                    "Per leggere file immagine o PDF è necessaria una "
                     "Gemini API Key. Clicca su 'Cambia API Key' per inserirla."
                 )
                 st.stop()
 
-            cache_key = f"img_df_{file_name}_{uploaded_file.size}"
+            cache_key = f"doc_df_{file_name}_{uploaded_file.size}"
             if cache_key not in st.session_state:
-                with st.spinner("Estrazione nominativi dall'immagine con Gemini..."):
+                with st.spinner("Estrazione nominativi dal file con Gemini..."):
                     mime_map = {
                         ".png": "image/png",
                         ".jpg": "image/jpeg",
                         ".jpeg": "image/jpeg",
+                        ".pdf": "application/pdf",
                     }
-                    st.session_state[cache_key] = estrai_aziende_da_immagine(
+                    st.session_state[cache_key] = estrai_aziende_da_documento(
                         uploaded_file.getvalue(),
                         mime_map[ext],
                         st.session_state.gemini_api_key,
@@ -670,7 +680,6 @@ if uploaded_file is not None:
         st.warning("Nessun dato trovato nel file caricato.")
         st.stop()
 
-    # Rinomina automaticamente la colonna delle aziende se ha un nome simile
     if "Azienda" not in df_input.columns:
         colonne_probabili = [
             c
@@ -689,7 +698,6 @@ if uploaded_file is not None:
         )
         st.stop()
 
-    # Rileva eventuale colonna località/città facoltativa
     col_localita = next(
         (
             c
@@ -718,7 +726,7 @@ if uploaded_file is not None:
         eta_placeholder = st.empty()
 
         tempo_inizio = time.time()
-        stima_iniziale_per_riga = 4.5  # secondi stimati per la prima riga
+        stima_iniziale_per_riga = 4.5
 
         for idx, (_, row) in enumerate(df_input.iterrows()):
             azienda = str(row["Azienda"]).strip()
@@ -728,7 +736,6 @@ if uploaded_file is not None:
                 else ""
             )
 
-            # Calcolo tempo stimato rimanente
             if idx == 0:
                 tempo_rimanente = totale * stima_iniziale_per_riga
             else:
@@ -743,7 +750,6 @@ if uploaded_file is not None:
                 f"Tempo stimato rimanente: **{formatta_tempo(tempo_rimanente)}**"
             )
 
-            # 1. Cerca su Google Places (Maps) — restituisce 1 o più risultati se ci sono omonimie
             candidati_maps = cerca_su_google_places(
                 azienda, localita, api_key=st.session_state.places_api_key
             )
@@ -754,7 +760,6 @@ if uploaded_file is not None:
                 pive_trovate = set()
                 cf_trovati = set()
 
-                # 2. Se trova il sito su Maps, estrae email, P.IVA e C.F. dal sito
                 if dati_maps["Sito_Web"]:
                     email_sito, pive_sito, cf_sito = estrai_dati_da_sito(
                         dati_maps["Sito_Web"]
@@ -766,7 +771,6 @@ if uploaded_file is not None:
 
                 dati_maps["Email_Sito"] = email_sito
 
-                # 3. Se manca telefono O manca email, avvia ricerca estesa su DuckDuckGo
                 if not dati_maps["Telefono_Maps"] or not email_sito:
                     dati_web, pive_web, cf_web = cerca_su_duckduckgo_web(
                         azienda, loc_effettiva
@@ -791,30 +795,33 @@ if uploaded_file is not None:
                     )
                     time.sleep(0.2)
 
-                # 4. Ricerca mirata P.IVA / C.F. se non ancora trovati
                 if not pive_trovate and not cf_trovati:
                     pive_ded, cf_ded = cerca_piva_cf_dedicata(azienda, loc_effettiva)
                     pive_trovate.update(pive_ded)
                     cf_trovati.update(cf_ded)
                     time.sleep(0.8)
 
-                # Se trovata P.IVA ma nessun C.F. alfabetico, per le società il C.F. coincide spesso con la P.IVA
                 piva_str = ", ".join(sorted(pive_trovate))
                 cf_str = ", ".join(sorted(cf_trovati)) if cf_trovati else piva_str
+                email_unificata = unisci_email(
+                    email_sito, dati_maps.get("Email_Web", "")
+                )
 
-                # Costruzione riga completa (mantenendo le colonne originali + P.IVA e C.F. accanto a Azienda)
                 riga_output = row.to_dict()
                 riga_output["P.IVA"] = piva_str
                 riga_output["C.F."] = cf_str
+                riga_output["Email"] = email_unificata
                 riga_output["Omonimia"] = (
                     f"Sì ({pos_omonimo} di {num_candidati})"
                     if num_candidati > 1
                     else "No"
                 )
+                riga_output["Trovato"] = dati_maps["Trovato_Maps"]
 
-                # Rimuove campo interno di supporto prima di salvare
                 dati_maps_puliti = {
-                    k: v for k, v in dati_maps.items() if k != "Citta_Maps"
+                    k: v
+                    for k, v in dati_maps.items()
+                    if k not in ("Citta_Maps", "Trovato_Maps")
                 }
                 riga_output.update(dati_maps_puliti)
                 righe_finali.append(riga_output)
@@ -827,29 +834,35 @@ if uploaded_file is not None:
         )
         eta_placeholder.empty()
 
-        # Creazione DataFrame finale con P.IVA e C.F. subito accanto a 'Azienda'
-        df_finale = pd.DataFrame(righe_finali)
-        colonne_orig = list(df_input.columns)
-        pos_azienda = colonne_orig.index("Azienda") + 1
-        colonne_ordinate = (
-            colonne_orig[:pos_azienda]
-            + ["P.IVA", "C.F.", "Omonimia"]
-            + colonne_orig[pos_azienda:]
-            + [
-                c
-                for c in df_finale.columns
-                if c not in colonne_orig and c not in ["P.IVA", "C.F.", "Omonimia"]
-            ]
-        )
-        df_finale = df_finale[colonne_ordinate]
+        # Suddivisione in 2 fogli
+        df_completo = pd.DataFrame(righe_finali)
 
-        # Esportazione Excel in memoria
+        colonne_foglio1 = [
+            "Azienda",
+            "P.IVA",
+            "C.F.",
+            "Sito_Web",
+            "Email",
+            "Omonimia",
+            "Trovato",
+        ]
+        df_foglio1 = df_completo[colonne_foglio1].copy()
+
+        # Nel secondo foglio inserisce 'Azienda' come riferimento + tutte le altre colonne
+        colonne_foglio2 = ["Azienda"] + [
+            c for c in df_completo.columns if c not in colonne_foglio1
+        ]
+        df_foglio2 = df_completo[colonne_foglio2].copy()
+
+        # Esportazione Excel multi-foglio in memoria
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            df_finale.to_excel(writer, index=False)
+            df_foglio1.to_excel(writer, sheet_name="Sintesi", index=False)
+            df_foglio2.to_excel(writer, sheet_name="Dettagli", index=False)
         buffer.seek(0)
 
-        st.session_state.df_finale = df_finale
+        st.session_state.df_foglio1 = df_foglio1
+        st.session_state.df_foglio2 = df_foglio2
         st.session_state.risultato_excel = buffer.getvalue()
         st.session_state.nome_file_output = output_filename
 
@@ -858,7 +871,11 @@ if uploaded_file is not None:
 # ------------------------------------------
 if st.session_state.risultato_excel is not None:
     st.subheader("Risultati elaborati")
-    st.dataframe(st.session_state.df_finale, use_container_width=True)
+    tab1, tab2 = st.tabs(["Foglio 1 — Sintesi", "Foglio 2 — Dettagli"])
+    with tab1:
+        st.dataframe(st.session_state.df_foglio1, use_container_width=True)
+    with tab2:
+        st.dataframe(st.session_state.df_foglio2, use_container_width=True)
 
     st.download_button(
         label=f"Scarica {st.session_state.nome_file_output}",

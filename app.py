@@ -37,6 +37,9 @@ HEADERS = {
     )
 }
 
+REQ_TIMEOUT = (2, 3)
+DDGS_TIMEOUT = 6
+
 EMAIL_REGEX = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
 PHONE_REGEX = r"(?:\+39\s?)?(?:0\d{1,4}[\s.-]?\d{5,8}|3\d{2}[\s.-]?\d{6,7})"
 PIVA_CONTEXT_REGEX = (
@@ -188,7 +191,7 @@ def estrai_dati_fiscali_da_testo(testo):
 
 
 def calcola_concordanza_indirizzo(testo, indirizzo="", cap="", citta=""):
-    """Calcola un punteggio di concordanza tra il testo della pagina e l'indirizzo Google Maps."""
+    """Calcola un punteggio di concordanza tra il testo e l'indirizzo Google Maps."""
     if not testo:
         return 0
     testo_low = testo.lower()
@@ -201,7 +204,6 @@ def calcola_concordanza_indirizzo(testo, indirizzo="", cap="", citta=""):
         score += 2
 
     if indirizzo:
-        # Estrae le parole significative della via (prima parte dell'indirizzo)
         prima_parte = str(indirizzo).split(",")[0].lower()
         parole_escluse = {
             "via", "viale", "piazza", "piazzale", "corso", "strada", "largo",
@@ -348,7 +350,7 @@ def estrai_aziende_da_documento(file_bytes, mime_type, gemini_api_key):
 # LIVELLO 1: GOOGLE PLACES API (MAPS) + OMONIMIE
 # ==========================================
 def cerca_su_google_places(nome_azienda, localita="", api_key=""):
-    """Interroga Google Places API (New) e rileva eventuali imprese omonime."""
+    """Interroga Google Places API (New) e rileva eventuali imprese omonime (max 3)."""
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
@@ -365,7 +367,7 @@ def cerca_su_google_places(nome_azienda, localita="", api_key=""):
         if localita
         else f"{nome_azienda}, Italia"
     )
-    payload = {"textQuery": query, "maxResultCount": 5}
+    payload = {"textQuery": query, "maxResultCount": 3}
 
     risultato_vuoto = [
         {
@@ -385,7 +387,7 @@ def cerca_su_google_places(nome_azienda, localita="", api_key=""):
     ]
 
     try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        response = requests.post(url, json=payload, headers=headers, timeout=8)
         data = response.json()
 
         if "error" in data:
@@ -454,16 +456,17 @@ def cerca_su_google_places(nome_azienda, localita="", api_key=""):
 def cerca_su_ufficio_camerale(nome_azienda, indirizzo="", cap="", citta=""):
     """
     Cerca l'azienda su ufficiocamerale.it verificando la concordanza tra P.IVA e indirizzo.
-    Ignora il footer del portale per evitare la P.IVA di Ufficio Camerale stesso.
+    Legge prima snippet e URL (veloce e senza blocchi), visita la pagina solo se serve (max 2).
     """
     nome_pulito = pulisci_nome_azienda(nome_azienda)
     query = f"site:ufficiocamerale.it {nome_pulito} {citta}".strip()
 
     miglior_candidato = None  # (score, piva, cf)
+    pagine_visitate = 0
 
     try:
-        with DDGS() as ddgs:
-            items = list(ddgs.text(query, region="it-it", max_results=5))
+        with DDGS(timeout=DDGS_TIMEOUT) as ddgs:
+            items = list(ddgs.text(query, region="it-it", max_results=4))
 
         for item in items:
             link = item.get("href", "")
@@ -473,39 +476,45 @@ def cerca_su_ufficio_camerale(nome_azienda, indirizzo="", cap="", citta=""):
             snippet = item.get("title", "") + " " + item.get("body", "")
             pive_trovate, cf_trovati = estrai_dati_fiscali_da_testo(snippet)
 
-            # Controlla se la P.IVA è nell'URL della scheda
+            # Controlla se la P.IVA è direttamente nell'URL della scheda
             for num in re.findall(r"(?<!\d)(\d{11})(?!\d)", link):
                 if valida_piva(num):
                     pive_trovate.insert(0, num)
 
             testo_completo = snippet
+            score = calcola_concordanza_indirizzo(testo_completo, indirizzo, cap, citta)
 
-            # Visita la pagina della scheda rimuovendo il footer del portale
-            try:
-                resp = requests.get(link, headers=HEADERS, timeout=(3, 5), verify=False)
-                if resp.status_code == 200:
-                    soup = BeautifulSoup(resp.text, "html.parser")
-                    for tag in soup.find_all(["footer", "script", "style"]):
-                        tag.decompose()
-                    testo_pagina = soup.get_text(" ")
-                    testo_completo = snippet + " " + testo_pagina
-                    p_pag, c_pag = estrai_dati_fiscali_da_testo(testo_pagina)
-                    pive_trovate.extend(p_pag)
-                    cf_trovati.extend(c_pag)
-            except Exception:
-                pass
+            # Visita la pagina solo se manca la P.IVA o la concordanza indirizzo è bassa (max 2 visite)
+            if (not pive_trovate or score < 4) and pagine_visitate < 2:
+                pagine_visitate += 1
+                try:
+                    resp = requests.get(
+                        link, headers=HEADERS, timeout=REQ_TIMEOUT, verify=False
+                    )
+                    if resp.status_code == 200:
+                        soup = BeautifulSoup(resp.text, "html.parser")
+                        for tag in soup.find_all(["footer", "script", "style"]):
+                            tag.decompose()
+                        testo_pagina = soup.get_text(" ")
+                        testo_completo = snippet + " " + testo_pagina
+                        p_pag, c_pag = estrai_dati_fiscali_da_testo(testo_pagina)
+                        pive_trovate.extend(p_pag)
+                        cf_trovati.extend(c_pag)
+                        score = calcola_concordanza_indirizzo(
+                            testo_completo, indirizzo, cap, citta
+                        )
+                except Exception:
+                    pass
 
             if not pive_trovate:
                 continue
 
             piva_scheda = seleziona_migliore(pive_trovate)
             cf_scheda = seleziona_migliore(cf_trovati) if cf_trovati else piva_scheda
-            score = calcola_concordanza_indirizzo(testo_completo, indirizzo, cap, citta)
 
             if miglior_candidato is None or score > miglior_candidato[0]:
                 miglior_candidato = (score, piva_scheda, cf_scheda)
 
-            # Se abbiamo trovato una concordanza forte (es. CAP + via/città), ci fermiamo subito
             if score >= 6:
                 break
 
@@ -532,7 +541,7 @@ def estrai_dati_da_sito(url_sito):
     def scansiona_pagina(target_url):
         try:
             resp = requests.get(
-                target_url, headers=HEADERS, timeout=(3, 4), verify=False
+                target_url, headers=HEADERS, timeout=REQ_TIMEOUT, verify=False
             )
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
@@ -578,9 +587,9 @@ def estrai_dati_da_sito(url_sito):
                 link_completo = urljoin(url_sito, a["href"])
                 pagine_da_visitare.add(link_completo)
 
-        for link in list(pagine_da_visitare)[:3]:
+        for link in list(pagine_da_visitare)[:2]:
             scansiona_pagina(link)
-            if len(emails_trovate) > 3 and len(pive_trovate) > 0:
+            if len(emails_trovate) > 2 and len(pive_trovate) > 0:
                 break
 
     return ", ".join(sorted(emails_trovate)), pive_trovate, cf_trovati
@@ -602,7 +611,7 @@ def visita_e_estrai(url):
         return set(), set(), [], []
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=(3, 4), verify=False)
+        resp = requests.get(url, headers=HEADERS, timeout=REQ_TIMEOUT, verify=False)
         if resp.status_code == 200:
             soup = BeautifulSoup(resp.text, "html.parser")
             for tag in soup.find_all(["footer", "script", "style"]):
@@ -649,10 +658,11 @@ def cerca_su_duckduckgo_web(nome_azienda, localita=""):
     pive_totali = []
     cf_totali = []
     altri_link = []
+    pagine_visitate = 0
 
     try:
-        with DDGS() as ddgs:
-            items = list(ddgs.text(query, region="it-it", max_results=8))
+        with DDGS(timeout=DDGS_TIMEOUT) as ddgs:
+            items = list(ddgs.text(query, region="it-it", max_results=6))
 
         if not items:
             return risultato, pive_totali, cf_totali
@@ -680,19 +690,23 @@ def cerca_su_duckduckgo_web(nome_azienda, localita=""):
             elif "paginegialle.it" in link_lower or "paginebianche.it" in link_lower:
                 if not risultato["PagineGialle_Bianche"]:
                     risultato["PagineGialle_Bianche"] = link
-                em_pg, tel_pg, piva_pg, cf_pg = visita_e_estrai(link)
-                emails_totali.update(em_pg)
-                telefoni_totali.update(tel_pg)
-                pive_totali.extend(piva_pg)
-                cf_totali.extend(cf_pg)
+                if pagine_visitate < 2:
+                    pagine_visitate += 1
+                    em_pg, tel_pg, piva_pg, cf_pg = visita_e_estrai(link)
+                    emails_totali.update(em_pg)
+                    telefoni_totali.update(tel_pg)
+                    pive_totali.extend(piva_pg)
+                    cf_totali.extend(cf_pg)
             else:
                 if len(altri_link) < 3:
                     altri_link.append(link)
-                em_pag, tel_pag, piva_pag, cf_pag = visita_e_estrai(link)
-                emails_totali.update(em_pag)
-                telefoni_totali.update(tel_pag)
-                pive_totali.extend(piva_pag)
-                cf_totali.extend(cf_pag)
+                if pagine_visitate < 2:
+                    pagine_visitate += 1
+                    em_pag, tel_pag, piva_pag, cf_pag = visita_e_estrai(link)
+                    emails_totali.update(em_pag)
+                    telefoni_totali.update(tel_pag)
+                    pive_totali.extend(piva_pag)
+                    cf_totali.extend(cf_pag)
 
         risultato["Email_Web"] = ", ".join(sorted(emails_totali))
         risultato["Telefono_Web"] = ", ".join(sorted(telefoni_totali))
@@ -705,7 +719,7 @@ def cerca_su_duckduckgo_web(nome_azienda, localita=""):
 
 
 def cerca_piva_cf_fallback(nome_azienda, indirizzo="", cap="", citta=""):
-    """Fallback su altri portali camerali italiani se Ufficio Camerale e sito non hanno dato esito."""
+    """Fallback veloce su altri portali camerali italiani se Ufficio Camerale e sito non bastano."""
     nome_pulito = pulisci_nome_azienda(nome_azienda)
     portali = (
         "site:reportaziende.it OR site:fatturatoitalia.it OR "
@@ -717,11 +731,12 @@ def cerca_piva_cf_fallback(nome_azienda, indirizzo="", cap="", citta=""):
     ]
 
     miglior_candidato = None  # (score, piva, cf)
+    pagine_visitate = 0
 
     for query in queries:
         try:
-            with DDGS() as ddgs:
-                items = list(ddgs.text(query, region="it-it", max_results=5))
+            with DDGS(timeout=DDGS_TIMEOUT) as ddgs:
+                items = list(ddgs.text(query, region="it-it", max_results=4))
 
             for item in items:
                 link = item.get("href", "")
@@ -732,7 +747,8 @@ def cerca_piva_cf_fallback(nome_azienda, indirizzo="", cap="", citta=""):
                     if valida_piva(num):
                         pive.insert(0, num)
 
-                if not pive and link:
+                if not pive and link and pagine_visitate < 2:
+                    pagine_visitate += 1
                     _, _, p_pag, c_pag = visita_e_estrai(link)
                     pive.extend(p_pag)
                     cfs.extend(c_pag)
@@ -749,7 +765,7 @@ def cerca_piva_cf_fallback(nome_azienda, indirizzo="", cap="", citta=""):
 
             if miglior_candidato is not None:
                 break
-            time.sleep(0.6)
+            time.sleep(0.4)
         except Exception:
             pass
 
@@ -932,7 +948,7 @@ if uploaded_file is not None:
         eta_placeholder = st.empty()
 
         tempo_inizio = time.time()
-        stima_iniziale_per_riga = 5.0
+        stima_iniziale_per_riga = 4.0
 
         for idx, (_, row) in enumerate(df_input.iterrows()):
             azienda = str(row["Azienda"]).strip()
@@ -973,7 +989,7 @@ if uploaded_file is not None:
                     cap=cap_maps,
                     citta=loc_effettiva,
                 )
-                time.sleep(0.5)
+                time.sleep(0.3)
 
                 # LIVELLO 2: Sito Web (email + eventuale P.IVA se non trovata su Ufficio Camerale)
                 pive_sito = []
@@ -997,7 +1013,7 @@ if uploaded_file is not None:
                         azienda, loc_effettiva
                     )
                     dati_maps.update(dati_web)
-                    time.sleep(1.2)
+                    time.sleep(0.8)
                 else:
                     dati_maps.update(
                         {
@@ -1054,4 +1070,75 @@ if uploaded_file is not None:
                     if num_candidati > 1
                     else "No"
                 )
-                riga_output["Trovato"] = dati_maps
+                riga_output["Trovato"] = dati_maps["Trovato_Maps"]
+
+                dati_maps_puliti = {
+                    k: v
+                    for k, v in dati_maps.items()
+                    if k not in ("Citta_Maps", "Trovato_Maps", "Email_Web", "Email_Sito")
+                }
+                riga_output.update(dati_maps_puliti)
+                righe_finali.append(riga_output)
+
+            progress_bar.progress((idx + 1) / totale)
+
+        tempo_totale = time.time() - tempo_inizio
+        status_placeholder.success(
+            f"Elaborazione completata in {formatta_tempo(tempo_totale)}!"
+        )
+        eta_placeholder.empty()
+
+        # Suddivisione in 2 fogli
+        df_completo = pd.DataFrame(righe_finali)
+
+        colonne_foglio1 = [
+            "Azienda",
+            "P.IVA",
+            "C.F.",
+            "Telefono",
+            "Sito_Web",
+            "Email",
+            "Omonimia",
+            "Trovato",
+        ]
+        df_foglio1 = df_completo[colonne_foglio1].copy()
+
+        colonne_foglio2 = ["Azienda", "P.IVA", "C.F."] + [
+            c for c in df_completo.columns if c not in colonne_foglio1
+        ]
+        df_foglio2 = df_completo[colonne_foglio2].copy()
+
+        # Esportazione Excel multi-foglio con adattamento automatico celle
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df_foglio1.to_excel(writer, sheet_name="Sintesi", index=False)
+            df_foglio2.to_excel(writer, sheet_name="Dettagli", index=False)
+
+            formatta_foglio_excel(writer.sheets["Sintesi"])
+            formatta_foglio_excel(writer.sheets["Dettagli"])
+
+        buffer.seek(0)
+
+        st.session_state.df_foglio1 = df_foglio1
+        st.session_state.df_foglio2 = df_foglio2
+        st.session_state.risultato_excel = buffer.getvalue()
+        st.session_state.nome_file_output = output_filename
+
+# ------------------------------------------
+# STEP 4: VISUALIZZAZIONE E DOWNLOAD
+# ------------------------------------------
+if st.session_state.risultato_excel is not None:
+    st.subheader("Risultati elaborati")
+    tab1, tab2 = st.tabs(["Foglio 1 — Sintesi", "Foglio 2 — Dettagli"])
+    with tab1:
+        st.dataframe(st.session_state.df_foglio1, use_container_width=True)
+    with tab2:
+        st.dataframe(st.session_state.df_foglio2, use_container_width=True)
+
+    st.download_button(
+        label=f"Scarica {st.session_state.nome_file_output}",
+        data=st.session_state.risultato_excel,
+        file_name=st.session_state.nome_file_output,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+    )

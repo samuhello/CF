@@ -224,12 +224,12 @@ STOPWORDS_AZIENDA = {
 
 
 # ==========================================
-# HEADER PERSONALIZZATO (IN ALTO A SINISTRA)
+# HEADER PERSONALIZZATO + TASTO GUIDA
 # ==========================================
 def render_header():
     st.markdown(
         """
-        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 1.5rem;">
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 1rem;">
             <svg xmlns="http://www.w3.org/2000/svg"
                  width="38" height="38" viewBox="0 0 24 24"
                  fill="none" stroke="#EB792D" stroke-width="2.6"
@@ -252,6 +252,36 @@ def render_header():
         """,
         unsafe_allow_html=True,
     )
+
+    with st.expander("Come funziona PCF?", expanded=False):
+        st.markdown(
+            """
+**PCF (Prospect Contact Finder)** è un'app pensata per aiutarti a trovare e aggiornare i contatti delle aziende partendo da un tuo file (Excel, `.ods`, `.csv`, ma anche un PDF o una foto), senza mai toccare o mettere a rischio i dati che hai già.
+
+### Come funziona
+Carichi il tuo file e PCF fa subito una copia di sicurezza dei tuoi dati originali, così non perdi mai nulla. Poi guarda il nome dell'impresa e, se ci sono, anche **Partita IVA** e **Codice Fiscale** per essere sicuro di cercare proprio l'azienda giusta e non un'altra con lo stesso nome.
+
+Quando finisce, ti prepara un nuovo file Excel diviso in **due fogli**:
+- **Nel primo foglio** trovi i contatti principali: `Denominazione`, `P.IVA`, `C.F.`, `Email`, `Email nuova`, `Telefono`, `Telefono nuovo` e `Sito Web`.
+- **Nel secondo foglio** trovi `Denominazione`, `P.IVA`, `C.F.`, tutte le altre colonne che avevi nel tuo file iniziale e le informazioni extra trovate (come la media delle recensioni Google, l'indirizzo, i social e il livello di affidabilità del dato).
+
+Tutto quello che avevi già resta al suo posto in **nero**, mentre quello che trova PCF viene scritto in **rosso**:
+- Se per un'azienda **non avevi** ancora email o telefono, il dato trovato viene messo direttamente nella colonna `Email` o `Telefono` (in rosso).
+- Se invece email o telefono **c'erano già**, quelli vecchi restano lì e i nuovi vengono messi accanto, in `Email nuova` o `Telefono nuovo` (sempre in rosso).
+
+### Cosa trova e quando lo trova
+L'app cerca di darti solo contatti affidabili: se non è sicura di un dato, preferisce lasciarlo vuoto piuttosto che inventarlo o mischiarlo.
+
+Per ogni azienda controlla prima i dati fiscali (se ci sono P.IVA o C.F.) e passa su **Google Maps**, così raccoglie quasi sempre telefono, sito web, indirizzo e **media delle recensioni Google**, e dà un'occhiata al sito ufficiale dell'azienda per cercare email e recapiti.
+
+Se da Google Maps e dal sito manca ancora qualcosa di importante (email, telefono o sito), allora fa una ricerca extra su **DuckDuckGo** per provare a completare i contatti e, quando capita, recupera anche i link ai social o a PagineGialle/PagineBianche. Se invece i contatti principali sono già stati trovati, non perde tempo con ricerche in più.
+
+### La tua privacy
+I tuoi contatti già salvati **non vengono mai letti** dai motori di ricerca o dai servizi esterni durante la ricerca: l'app li nasconde prima di partire e li rimette a posto solo alla fine, via codice.
+
+L'intelligenza artificiale viene usata solo se carichi un PDF o un'immagine, per leggere i nomi delle aziende (e non estrae contatti); sui fogli Excel, `.ods` e `.csv` non interviene mai. In più, le chiavi API che inserisci restano attive solo durante la tua sessione e non vengono salvate.
+            """
+        )
 
 
 # ==========================================
@@ -393,7 +423,6 @@ def pulisci_nome_azienda(nome):
 def normalizza_sigle_nome(nome):
     """Compatta le sigle puntate (es. 'F.G. UNO' -> 'fg uno') mantenendo il resto leggibile."""
     base = pulisci_nome_azienda(nome).lower()
-    # Unisce lettere singole separate da punti (es. f.g. -> fg)
     base = re.sub(r"\b([a-z0-9])\.(?=[a-z0-9]\b)", r"\1", base)
     base = re.sub(r"[^a-z0-9àèéìòù ]", " ", base)
     return re.sub(r"\s+", " ", base).strip()
@@ -866,7 +895,6 @@ def prepara_backup_e_copia_oscurata(df_originale, cols_map):
     col_piva = cols_map["piva"]
     col_cf = cols_map["cf"]
 
-    # Oscuramento meccanico totale dei contatti originali
     df_lavoro = df_backup.copy(deep=True)
     for col_sensibile in [col_email, col_tel, col_sito]:
         if col_sensibile and col_sensibile in df_lavoro.columns:
@@ -1014,7 +1042,6 @@ def cerca_su_ufficio_camerale(
                 if testo_contiene_chiave_fiscale(testo_completo, piva_nota, cf_noto):
                     score += 10
 
-                # Estrae CAP + Comune solo se ancorati a sigla provincia es. "20121 Milano (MI)"
                 cap_trovato = ""
                 citta_trovata = ""
                 m_loc = re.search(
@@ -1140,7 +1167,6 @@ def cerca_su_google_places(nome_azienda, localita="", api_key="", cap_hint=""):
                 if "locality" in types_list:
                     citta = comp.get("longText", "")
 
-            # Scarta solo se CAP da Ufficio Camerale indica chiaramente un'altra area geografica
             if cap_hint and cap and cap[:2] != cap_hint[:2]:
                 continue
 
@@ -1169,7 +1195,6 @@ def cerca_su_google_places(nome_azienda, localita="", api_key="", cap_hint=""):
                 }
             )
 
-        # Priorità ai candidati coerenti con CAP o località input senza scartare sedi in provincia
         def priorita_geo(r):
             p = 0
             if cap_hint and r.get("CAP") == cap_hint:
@@ -1655,14 +1680,8 @@ def riallinea_e_crea_excel_2_fogli(
 
     - FOGLIO 1 ('Contatti_Principali'):
       Denominazione | P.IVA | C.F. | Email | Email nuova | Telefono | Telefono nuovo | Sito Web
-      * Se Email originale mancava -> nuova email va in 'Email' (in ROSSO).
-      * Se Email originale era presente -> resta in 'Email' (nero) e la nuova va in 'Email nuova' (in ROSSO).
-      * Se Telefono originale mancava -> nuovo telefono va in 'Telefono' (in ROSSO).
-      * Se Telefono originale era presente -> resta in 'Telefono' (nero) e il nuovo va in 'Telefono nuovo' (in ROSSO).
-      * Se Sito Web originale mancava -> nuovo sito va in 'Sito Web' (in ROSSO); se presente resta in nero (e l'eventuale nuovo sito va in Foglio 2).
-
     - FOGLIO 2 ('Altre_Colonne_e_Dettagli'):
-      Denominazione | P.IVA | C.F. | <tutte le altre colonne originali non nel Foglio 1> | Valutazione_Media | Numero_Recensioni | <altri dettagli Maps/Web/Social>
+      Denominazione | P.IVA | C.F. | <altre colonne originali> | Valutazione_Media | <altri dettagli>
     """
     col_az_orig = cols_map["azienda"]
     col_piva_orig = cols_map["piva"]

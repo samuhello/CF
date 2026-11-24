@@ -215,9 +215,11 @@ PREFISSI_EMAIL_ESCLUSI = (
 STOPWORDS_AZIENDA = {
     "di", "del", "della", "dei", "degli", "delle", "da", "in", "con", "per",
     "su", "tra", "fra", "il", "lo", "la", "le", "gli", "un", "una", "ed",
-    "e", "a", "studio", "ditta", "impresa", "azienda", "societa", "società",
-    "gruppo", "group", "italia", "italy", "service", "servizi", "srl", "srls",
-    "spa", "snc", "sas", "scarl", "cooperativa", "coop", "officina", "centro",
+    "al", "ad", "de", "co", "ci", "ne", "se", "si", "e", "a", "studio",
+    "ditta", "impresa", "azienda", "societa", "società", "gruppo", "group",
+    "italia", "italy", "service", "servizi", "srl", "srls", "spa", "snc",
+    "sas", "scarl", "cooperativa", "coop", "officina", "centro", "agenzia",
+    "attivita", "attività",
 }
 
 
@@ -388,11 +390,20 @@ def pulisci_nome_azienda(nome):
     return pulito if len(pulito) >= 3 else str(nome).strip()
 
 
+def normalizza_sigle_nome(nome):
+    """Compatta le sigle puntate (es. 'F.G. UNO' -> 'fg uno') mantenendo il resto leggibile."""
+    base = pulisci_nome_azienda(nome).lower()
+    # Unisce lettere singole separate da punti (es. f.g. -> fg)
+    base = re.sub(r"\b([a-z0-9])\.(?=[a-z0-9]\b)", r"\1", base)
+    base = re.sub(r"[^a-z0-9àèéìòù ]", " ", base)
+    return re.sub(r"\s+", " ", base).strip()
+
+
 def token_significativi_azienda(nome):
-    """Estrae le parole distintive del nome azienda (>= 3 caratteri, escluse stopwords)."""
-    pulito = re.sub(r"[^a-z0-9àèéìòù ]", " ", pulisci_nome_azienda(nome).lower())
+    """Estrae le parole distintive del nome azienda (incluse sigle di 2 caratteri non stopword)."""
+    pulito = normalizza_sigle_nome(nome)
     tokens = [
-        t for t in pulito.split() if len(t) >= 3 and t not in STOPWORDS_AZIENDA
+        t for t in pulito.split() if len(t) >= 2 and t not in STOPWORDS_AZIENDA
     ]
     return tokens
 
@@ -700,16 +711,16 @@ def formatta_tempo(secondi):
 
 def nomi_corrispondono(nome_cercato, nome_trovato):
     """
-    Verifica rigorosa di corrispondenza tra due denominazioni (gestisce anche
-    inversione Cognome Nome / Nome Cognome per ditte individuali).
+    Verifica rigorosa di corrispondenza tra due denominazioni (gestisce sigle
+    come 'F.G. UNO' / 'A3 CAPITAL' e inversione Cognome Nome / Nome Cognome).
     """
-    a = re.sub(r"[^a-z0-9 ]", " ", pulisci_nome_azienda(nome_cercato).lower()).strip()
-    b = re.sub(r"[^a-z0-9 ]", " ", pulisci_nome_azienda(nome_trovato).lower()).strip()
+    a = normalizza_sigle_nome(nome_cercato)
+    b = normalizza_sigle_nome(nome_trovato)
     if not a or not b:
         return False
     if a == b:
         return True
-    if len(a) >= 5 and (a in b or b in a):
+    if len(a) >= 4 and (a in b or b in a):
         return True
 
     tok_a = set(token_significativi_azienda(nome_cercato))
@@ -720,7 +731,7 @@ def nomi_corrispondono(nome_cercato, nome_trovato):
     comuni = tok_a & tok_b
     if len(tok_a) == 1:
         return len(comuni) == 1
-    return len(comuni) >= 2 or (len(comuni) / len(tok_a)) >= 0.70
+    return len(comuni) >= 2 or (len(comuni) / len(tok_a)) >= 0.65
 
 
 def rileva_colonne_tabella(df):
@@ -844,8 +855,8 @@ def prepara_backup_e_copia_oscurata(df_originale, cols_map):
     2. Crea una copia di lavoro con TUTTI i valori di Email, Telefono e Sito Web
        COMPLETAMENTE CANCELLATI (oscuramento meccanico: i contatti già presenti nel
        file caricato non vengono mai letti dai motori di ricerca né dall'AI).
-    3. Prepara TUTTE le righe per la ricerca completa (email + telefono + sito web)
-       mantenendo P.IVA e C.F. normalizzati come riferimento.
+    3. Prepara TUTTE le righe per la ricerca completa mantenendo P.IVA e C.F.
+       normalizzati come riferimento.
     """
     df_backup = df_originale.copy(deep=True).reset_index(drop=True)
 
@@ -1003,10 +1014,11 @@ def cerca_su_ufficio_camerale(
                 if testo_contiene_chiave_fiscale(testo_completo, piva_nota, cf_noto):
                     score += 10
 
+                # Estrae CAP + Comune solo se ancorati a sigla provincia es. "20121 Milano (MI)"
                 cap_trovato = ""
                 citta_trovata = ""
                 m_loc = re.search(
-                    r"\b(\d{5})\s+([A-ZÀ-Ü][a-zà-üA-ZÀ-Ü'\s-]{2,25}?)(?:\s*\([A-Z]{2}\)|\s*[-|,])",
+                    r"\b(\d{5})\s+([A-ZÀ-Ü][a-zà-üA-ZÀ-Ü'\s-]{2,25}?)\s*\([A-Z]{2}\)",
                     testo_completo,
                 )
                 if m_loc:
@@ -1041,12 +1053,13 @@ def cerca_su_ufficio_camerale(
 
 
 # ==========================================
-# LIVELLO 1: GOOGLE PLACES API (MAPS) CON VERIFICA RIGOROSA
+# LIVELLO 1: GOOGLE PLACES API (MAPS) CON RECENSIONI E VERIFICA
 # ==========================================
 def cerca_su_google_places(nome_azienda, localita="", api_key="", cap_hint=""):
     """
-    Interroga Google Places API (New) accettando SOLO corrispondenze reali sul nome
-    (e coerenti con CAP/località se noti). MAI fallback cieco su places[0].
+    Interroga Google Places API (New) per ogni impresa raccogliendo sempre
+    contatti, sito e media recensioni Google (Valutazione_Media + Numero_Recensioni).
+    Accetta solo corrispondenze reali sul nome (mai fallback cieco su places[0]).
     """
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
@@ -1127,16 +1140,8 @@ def cerca_su_google_places(nome_azienda, localita="", api_key="", cap_hint=""):
                 if "locality" in types_list:
                     citta = comp.get("longText", "")
 
+            # Scarta solo se CAP da Ufficio Camerale indica chiaramente un'altra area geografica
             if cap_hint and cap and cap[:2] != cap_hint[:2]:
-                continue
-            if (
-                localita
-                and citta
-                and len(localita.strip()) >= 3
-                and localita.strip().lower() not in indirizzo.lower()
-                and citta.strip().lower() not in localita.strip().lower()
-                and not (cap_hint and cap == cap_hint)
-            ):
                 continue
 
             sito_raw = place.get("websiteUri", "")
@@ -1164,8 +1169,17 @@ def cerca_su_google_places(nome_azienda, localita="", api_key="", cap_hint=""):
                 }
             )
 
-        if cap_hint and len(risultati) > 1:
-            risultati.sort(key=lambda r: 0 if r.get("CAP") == cap_hint else 1)
+        # Priorità ai candidati coerenti con CAP o località input senza scartare sedi in provincia
+        def priorita_geo(r):
+            p = 0
+            if cap_hint and r.get("CAP") == cap_hint:
+                p -= 4
+            if localita and localita.strip().lower() in r.get("Indirizzo", "").lower():
+                p -= 2
+            return p
+
+        if len(risultati) > 1:
+            risultati.sort(key=priorita_geo)
 
         return risultati if risultati else risultato_vuoto
     except Exception:
@@ -1318,7 +1332,7 @@ def estrai_dati_da_sito_verificato(
     titoli_tutti = " ".join(titoli_pagine)
     tokens_az = token_significativi_azienda(nome_azienda)
 
-    match_dominio = any(t in dominio_base for t in tokens_az if len(t) >= 4)
+    match_dominio = any(t in dominio_base for t in tokens_az if len(t) >= 3)
     match_titolo = (
         sum(1 for t in tokens_az if t in titoli_tutti) >= max(1, min(2, len(tokens_az)))
     )
@@ -1440,10 +1454,10 @@ def cerca_su_duckduckgo_verificato(
     cerca_sito_ufficiale=True,
 ):
     """
-    Cerca su DuckDuckGo SOLO per:
-    1. Individuare e VERIFICARE il sito web ufficiale (usando P.IVA/CF e nome azienda).
-    2. Individuare eventuale scheda singola PagineGialle/PagineBianche verificata.
-    3. Raccogliere link social coerenti.
+    Cerca su DuckDuckGo quando mancano contatti principali:
+    1. Individua e VERIFICA il sito web ufficiale (usando P.IVA/CF e nome azienda).
+    2. Individua eventuale scheda singola PagineGialle/PagineBianche verificata.
+    3. Raccoglie link social coerenti (se presenti nei risultati).
     """
     nome_pulito = pulisci_nome_azienda(nome_azienda)
     tokens_az = token_significativi_azienda(nome_azienda)
@@ -1453,9 +1467,9 @@ def cerca_su_duckduckgo_verificato(
     if chiave_fiscale:
         queries.append(f'"{chiave_fiscale}" {nome_pulito}'.strip())
     queries.append(
-        f"{nome_pulito} {localita} contatti".strip()
+        f"{nome_pulito} {localita} Italia".strip()
         if localita
-        else f"{nome_pulito} Italia contatti"
+        else f"{nome_pulito} Italia"
     )
 
     risultato = {
@@ -1482,7 +1496,7 @@ def cerca_su_duckduckgo_verificato(
     for q_idx, query in enumerate(queries):
         try:
             with DDGS() as ddgs:
-                items = list(ddgs.text(query, region="it-it", max_results=6))
+                items = list(ddgs.text(query, region="it-it", max_results=8))
 
             for item in items:
                 link = item.get("href", "")
@@ -1496,14 +1510,17 @@ def cerca_su_duckduckgo_verificato(
                     testo_contiene_chiave_fiscale(snippet, piva_nota, cf_noto)
                     or sum(1 for t in tokens_az if t in snippet) >= max(1, min(2, len(tokens_az)))
                 )
+                social_coerente = snippet_coerente or any(
+                    t in link_lower for t in tokens_az if len(t) >= 4
+                )
 
-                if "facebook.com" in link_lower and snippet_coerente and not risultato["Facebook"]:
+                if "facebook.com" in link_lower and social_coerente and not risultato["Facebook"]:
                     risultato["Facebook"] = link
-                elif "instagram.com" in link_lower and snippet_coerente and not risultato["Instagram"]:
+                elif "instagram.com" in link_lower and social_coerente and not risultato["Instagram"]:
                     risultato["Instagram"] = link
-                elif "linkedin.com" in link_lower and snippet_coerente and not risultato["LinkedIn"]:
+                elif "linkedin.com" in link_lower and social_coerente and not risultato["LinkedIn"]:
                     risultato["LinkedIn"] = link
-                elif "tiktok.com" in link_lower and snippet_coerente and not risultato["TikTok"]:
+                elif "tiktok.com" in link_lower and social_coerente and not risultato["TikTok"]:
                     risultato["TikTok"] = link
                 elif "paginegialle.it" in link_lower or "paginebianche.it" in link_lower:
                     if not risultato["PagineGialle_Bianche"] and snippet_coerente:
@@ -1645,7 +1662,7 @@ def riallinea_e_crea_excel_2_fogli(
       * Se Sito Web originale mancava -> nuovo sito va in 'Sito Web' (in ROSSO); se presente resta in nero (e l'eventuale nuovo sito va in Foglio 2).
 
     - FOGLIO 2 ('Altre_Colonne_e_Dettagli'):
-      Denominazione | P.IVA | C.F. | <tutte le altre colonne originali non nel Foglio 1> | <colonne arricchimento PCF>
+      Denominazione | P.IVA | C.F. | <tutte le altre colonne originali non nel Foglio 1> | Valutazione_Media | Numero_Recensioni | <altri dettagli Maps/Web/Social>
     """
     col_az_orig = cols_map["azienda"]
     col_piva_orig = cols_map["piva"]
@@ -1682,13 +1699,13 @@ def riallinea_e_crea_excel_2_fogli(
     ]
 
     colonne_arricchimento_base = [
+        "Valutazione_Media",
+        "Numero_Recensioni",
         "Esito_Verifica",
         "Omonimia",
         "Trovato_Maps",
         "Nome_Maps",
         "Stato_Attivita",
-        "Valutazione_Media",
-        "Numero_Recensioni",
         "Indirizzo",
         "CAP",
         "Citta_Maps",
@@ -1702,7 +1719,6 @@ def riallinea_e_crea_excel_2_fogli(
         "Albi_Portali_Directory",
     ]
 
-    # Evita collisioni di nome se il file originale aveva già colonne come "Indirizzo" o "CAP"
     nomi_gia_usati_f2 = {"Denominazione", "P.IVA", "C.F."} | set(altre_colonne_originali)
     mappa_col_arricchimento = []
     if col_sito_orig:
@@ -1722,7 +1738,7 @@ def riallinea_e_crea_excel_2_fogli(
     righe_f1 = []
     righe_f2 = []
 
-    celle_rosse_f1 = set()  # (row_excel 1-based, col_excel 1-based)
+    celle_rosse_f1 = set()
     celle_rosse_f2 = set()
 
     col_idx_f1 = {c: i + 1 for i, c in enumerate(colonne_foglio1)}
@@ -1736,9 +1752,10 @@ def riallinea_e_crea_excel_2_fogli(
     nuove_email_count = 0
     nuovi_tel_count = 0
     nuovi_siti_count = 0
+    recensioni_trovate_count = 0
 
     for idx in range(len(df_backup)):
-        excel_row = idx + 2  # Riga 1 = intestazioni
+        excel_row = idx + 2
         row_bkp = df_backup.iloc[idx]
         res = risultati_primari_per_id.get(idx, {})
 
@@ -1748,7 +1765,6 @@ def riallinea_e_crea_excel_2_fogli(
             else ""
         )
 
-        # P.IVA (originale in nero, trovata ex novo in rosso)
         piva_orig_ok = col_piva_orig and valore_presente(row_bkp[col_piva_orig])
         if piva_orig_ok:
             piva_val = str(row_bkp[col_piva_orig]).strip()
@@ -1759,7 +1775,6 @@ def riallinea_e_crea_excel_2_fogli(
         else:
             piva_val = ""
 
-        # C.F. (originale in nero, trovato ex novo in rosso)
         cf_orig_ok = col_cf_orig and valore_presente(row_bkp[col_cf_orig])
         if cf_orig_ok:
             cf_val = str(row_bkp[col_cf_orig]).strip()
@@ -1770,7 +1785,7 @@ def riallinea_e_crea_excel_2_fogli(
         else:
             cf_val = ""
 
-        # EMAIL: se mancava -> in 'Email' (rosso); se già presente -> originale in 'Email' (nero) e trovata in 'Email nuova' (rosso)
+        # EMAIL
         email_orig_ok = col_email_orig and valore_presente(row_bkp[col_email_orig])
         email_trovata = res.get("Email_Trovata", "")
         if email_orig_ok:
@@ -1790,7 +1805,7 @@ def riallinea_e_crea_excel_2_fogli(
             else:
                 email_val = ""
 
-        # TELEFONO: se mancava -> in 'Telefono' (rosso); se già presente -> originale in 'Telefono' (nero) e trovato in 'Telefono nuovo' (rosso)
+        # TELEFONO
         tel_orig_ok = col_tel_orig and valore_presente(row_bkp[col_tel_orig])
         tel_trovato = res.get("Telefono_Trovato", "")
         if tel_orig_ok:
@@ -1810,7 +1825,7 @@ def riallinea_e_crea_excel_2_fogli(
             else:
                 tel_val = ""
 
-        # SITO WEB: se mancava -> in 'Sito Web' (rosso); se già presente -> originale in nero e nuovo eventuale in Foglio 2 (rosso)
+        # SITO WEB
         sito_orig_ok = col_sito_orig and valore_presente(row_bkp[col_sito_orig])
         sito_trovato = res.get("Sito_Web_Trovato", "")
         sito_extra_f2 = ""
@@ -1827,6 +1842,9 @@ def riallinea_e_crea_excel_2_fogli(
             else:
                 sito_val = ""
 
+        if valore_presente(res.get("Valutazione_Media")):
+            recensioni_trovate_count += 1
+
         righe_f1.append(
             {
                 "Denominazione": denom_val,
@@ -1840,7 +1858,6 @@ def riallinea_e_crea_excel_2_fogli(
             }
         )
 
-        # Costruzione riga Foglio 2
         riga_f2 = {
             "Denominazione": denom_val,
             "P.IVA": piva_val,
@@ -1883,6 +1900,7 @@ def riallinea_e_crea_excel_2_fogli(
         "nuove_email": nuove_email_count,
         "nuovi_telefoni": nuovi_tel_count,
         "nuovi_siti": nuovi_siti_count,
+        "recensioni_google": recensioni_trovate_count,
     }
     return df_foglio1, df_foglio2, output_buffer.getvalue(), stats
 
@@ -2121,7 +2139,7 @@ if uploaded_file is not None:
 
             loc_per_maps = localita or citta_fiscale
 
-            # LIVELLO 1: Google Places API (solo corrispondenze verificate)
+            # LIVELLO 1: Google Places API (sempre eseguito -> raccoglie sempre anche la media recensioni)
             candidati_maps = cerca_su_google_places(
                 azienda,
                 loc_per_maps,
@@ -2189,7 +2207,7 @@ if uploaded_file is not None:
                     piva_finale = seleziona_migliore(pive_sito)
                     cf_finale = seleziona_migliore(cf_sito) if cf_sito else piva_finale
 
-                # LIVELLO 3: DuckDuckGo SOLO per sito ufficiale verificato / scheda PG verificata / social
+                # LIVELLO 3: DuckDuckGo parte solo se mancano contatti principali (email, telefono o sito)
                 pive_web = []
                 cf_web = []
                 manca_tel = not (dati_maps["Telefono_Maps"] or tel_sito)
@@ -2326,6 +2344,8 @@ if uploaded_file is not None:
                     score_cand += 2
                 if dati_maps.get("Trovato_Maps") == "Sì":
                     score_cand += 1
+                if valore_presente(dati_maps.get("Valutazione_Media")):
+                    score_cand += 1
 
                 if score_cand > miglior_punteggio_riga:
                     miglior_punteggio_riga = score_cand
@@ -2363,10 +2383,11 @@ if st.session_state.risultato_excel is not None:
 
     if st.session_state.stats_risultato:
         s = st.session_state.stats_risultato
-        m1, m2, m3 = st.columns(3)
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Email trovate (in rosso)", s["nuove_email"])
         m2.metric("Telefoni trovati (in rosso)", s["nuovi_telefoni"])
-        m3.metric("Siti Web ufficiali trovati (in rosso)", s["nuovi_siti"])
+        m3.metric("Siti Web ufficiali (in rosso)", s["nuovi_siti"])
+        m4.metric("Medie recensioni Google", s["recensioni_google"])
 
     st.download_button(
         label=f"Scarica {st.session_state.nome_file_output}",

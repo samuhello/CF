@@ -5,6 +5,8 @@ import os
 import re
 import time
 import urllib.parse
+import xml.etree.ElementTree as ET
+import zipfile
 from collections import Counter
 from urllib.parse import urljoin
 
@@ -122,6 +124,113 @@ def render_header():
 
 
 # ==========================================
+# LETTURA FILE EXCEL / ODS / CSV (CON FALLBACK ODS NATIVO)
+# ==========================================
+def is_file_ods(file_bytes):
+    """Verifica se i byte del file corrispondono internamente a un archivio OpenDocument (.ods)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+            nomi = set(zf.namelist())
+            if "content.xml" in nomi and "xl/workbook.xml" not in nomi:
+                return True
+            if "mimetype" in nomi:
+                mime = zf.read("mimetype").decode("utf-8", errors="ignore").strip()
+                if "opendocument.spreadsheet" in mime:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def leggi_ods_senza_dipendenze(file_bytes):
+    """
+    Legge il primo foglio di un file .ods usando solo la libreria standard Python.
+    Usato come fallback automatico se 'odfpy' non è installato nell'ambiente.
+    """
+    ns = {
+        "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0",
+        "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0",
+    }
+    tag_cell = f"{{{ns['table']}}}table-cell"
+    tag_covered = f"{{{ns['table']}}}covered-table-cell"
+    attr_row_rep = f"{{{ns['table']}}}number-rows-repeated"
+    attr_col_rep = f"{{{ns['table']}}}number-columns-repeated"
+
+    with zipfile.ZipFile(io.BytesIO(file_bytes)) as zf:
+        xml_data = zf.read("content.xml")
+
+    root = ET.fromstring(xml_data)
+    table = root.find(".//table:table", ns)
+    if table is None:
+        return pd.DataFrame()
+
+    righe = []
+    for row in table.findall("table:table-row", ns):
+        row_repeat = int(row.attrib.get(attr_row_rep, "1"))
+        valori_riga = []
+
+        for child in row:
+            if child.tag not in (tag_cell, tag_covered):
+                continue
+            col_repeat = int(child.attrib.get(attr_col_rep, "1"))
+            if child.tag == tag_covered:
+                testo = ""
+            else:
+                paragrafi = ["".join(p.itertext()) for p in child.findall("text:p", ns)]
+                testo = "\n".join(paragrafi).strip()
+
+            # Evita di espandere centinaia di colonne vuote a fine riga (tipico di Calc)
+            if not testo and col_repeat > 50:
+                continue
+            valori_riga.extend([testo] * col_repeat)
+
+        while valori_riga and valori_riga[-1] == "":
+            valori_riga.pop()
+
+        if valori_riga:
+            for _ in range(min(row_repeat, 50)):
+                righe.append(list(valori_riga))
+
+    if not righe:
+        return pd.DataFrame()
+
+    max_cols = max(len(r) for r in righe)
+    righe_norm = [r + [""] * (max_cols - len(r)) for r in righe]
+
+    visti = {}
+    header = []
+    for i, h in enumerate(righe_norm[0]):
+        base = h.strip() if h.strip() else f"Colonna_{i + 1}"
+        if base in visti:
+            visti[base] += 1
+            header.append(f"{base}.{visti[base]}")
+        else:
+            visti[base] = 0
+            header.append(base)
+
+    return pd.DataFrame(righe_norm[1:], columns=header, dtype=str)
+
+
+def leggi_file_tabellare(file_bytes, ext):
+    """Legge XLSX, XLS, ODS (anche mascherati da XLSX) e CSV in modo robusto."""
+    if ext == ".csv":
+        return pd.read_csv(io.BytesIO(file_bytes), dtype=str)
+
+    if ext == ".ods" or is_file_ods(file_bytes):
+        try:
+            return pd.read_excel(io.BytesIO(file_bytes), engine="odf", dtype=str)
+        except ImportError:
+            return leggi_ods_senza_dipendenze(file_bytes)
+
+    try:
+        return pd.read_excel(io.BytesIO(file_bytes), dtype=str)
+    except ImportError as e:
+        if "odf" in str(e).lower():
+            return leggi_ods_senza_dipendenze(file_bytes)
+        raise
+
+
+# ==========================================
 # FUNZIONI DI SUPPORTO, PULIZIA E FORMATTAZIONE
 # ==========================================
 def valore_presente(val):
@@ -183,7 +292,7 @@ def valida_piva(piva):
 
 
 def normalizza_piva_input(val):
-    """Normalizza una P.IVA da Excel gestendo prefissi IT, decimali (.0) e zeri iniziali persi."""
+    """Normalizza una P.IVA da Excel/ODS gestendo prefissi IT, decimali (.0) e zeri iniziali persi."""
     if not valore_presente(val):
         return ""
     testo = str(val).strip().upper()
@@ -477,7 +586,6 @@ def prepara_backup_e_3_fogli(df_originale, cols_map):
         if col_sensibile and col_sensibile in df_lavoro.columns:
             df_lavoro[col_sensibile] = ""
 
-    # Colonne di servizio meccaniche per il riallineamento ("Puzzle")
     chiavi_identificative = []
     target_ricerca = []
     manca_sito_flags = []
@@ -490,7 +598,6 @@ def prepara_backup_e_3_fogli(df_originale, cols_map):
         pive_norm.append(piva_val)
         cfs_norm.append(cf_val)
 
-        # Chiave identificativa primaria: P.IVA o C.F. (fallback sicuro su ID riga se assenti)
         chiave = piva_val or cf_val or f"RIGA_{idx + 1}"
         chiavi_identificative.append(chiave)
 
@@ -647,7 +754,6 @@ def cerca_su_ufficio_camerale(
                 if testo_contiene_chiave_fiscale(testo_completo, piva_nota, cf_noto):
                     score += 10
 
-                # Estrae eventuale CAP e Comune dallo snippet/scheda se utili per Maps
                 cap_trovato = ""
                 citta_trovata = ""
                 m_loc = re.search(
@@ -787,7 +893,6 @@ def cerca_su_google_places(nome_azienda, localita="", api_key="", cap_hint=""):
                 }
             )
 
-        # Se abbiamo un CAP da verifica fiscale, porta in testa il candidato corrispondente
         if cap_hint and len(risultati) > 1:
             risultati.sort(key=lambda r: 0 if r.get("CAP") == cap_hint else 1)
 
@@ -1050,7 +1155,6 @@ def cerca_su_duckduckgo_web(
                         elif not sito_candidato:
                             sito_candidato = root_url
 
-            # Se la query fiscale ha già trovato ciò che serve, evita la seconda query
             soddisfatto = (
                 (target_foglio == "Solo_Email" and bool(emails_totali))
                 or (target_foglio == "Solo_Telefono" and bool(telefoni_totali))
@@ -1194,11 +1298,9 @@ def riallinea_puzzle_e_crea_excel(
         if col_ex not in df_finale.columns:
             df_finale[col_ex] = ""
 
-    # Garantisce tipo object/string sulle colonne scrivibili per evitare errori dtype
     for col_w in [col_piva, col_cf, col_tel, col_email, col_sito] + colonne_extra:
         df_finale[col_w] = df_finale[col_w].astype(object)
 
-    # Coordinate (row_idx_excel, col_idx_excel) 1-based da colorare in ROSSO
     celle_rosse_coordinate = set()
     col_index_map = {col: idx + 1 for idx, col in enumerate(df_finale.columns)}
 
@@ -1211,7 +1313,6 @@ def riallinea_puzzle_e_crea_excel(
 
         res = risultati_primari_per_id.get(idx)
         if not res:
-            # Riga già completa al 100%: esclusa dalla ricerca e ripristinata intatta
             df_finale.at[idx, "Foglio_Ricerca"] = "Esclusa (Completa 100%)"
             piva_orig = normalizza_piva_input(df_backup.at[idx, cols_map["piva"]]) if cols_map["piva"] else ""
             cf_orig = normalizza_cf_input(df_backup.at[idx, cols_map["cf"]]) if cols_map["cf"] else ""
@@ -1278,29 +1379,25 @@ def riallinea_puzzle_e_crea_excel(
         if not cf_orig_presente and valore_presente(res.get("C.F._Trovato")):
             df_finale.at[idx, col_cf] = res["C.F._Trovato"]
 
-        # 5. Popola le colonne di arricchimento dello zio
+        # 5. Popola le colonne di arricchimento
         for col_ex in colonne_extra:
             if col_ex in res:
                 df_finale.at[idx, col_ex] = res[col_ex]
 
-    # Scrittura del workbook Excel finale in memoria
     output_buffer = io.BytesIO()
     with pd.ExcelWriter(output_buffer, engine="openpyxl") as writer:
-        # Foglio 1: Risultato riallineato con nuovi dati in ROSSO
         df_finale.to_excel(writer, sheet_name="Risultato_Finale", index=False)
         formatta_foglio_excel(
             writer.sheets["Risultato_Finale"],
             celle_rosse=celle_rosse_coordinate,
         )
 
-        # Foglio 2: Dettaglio completo ricerche e omonimie
         if df_dettaglio_completo is not None and not df_dettaglio_completo.empty:
             df_dettaglio_completo.to_excel(
                 writer, sheet_name="Dettaglio_Omonimie", index=False
             )
             formatta_foglio_excel(writer.sheets["Dettaglio_Omonimie"])
 
-        # Fogli intermedi di lavoro (Solo_Email, Solo_Telefono, Email_e_Telefono)
         if includi_fogli_lavoro:
             for nome_foglio in ["Solo_Email", "Solo_Telefono", "Email_e_Telefono"]:
                 df_f = fogli_elaborati.get(nome_foglio)
@@ -1400,8 +1497,8 @@ with col_reset:
 # ------------------------------------------
 uploaded_file = st.file_uploader(
     "Carica file",
-    type=["png", "jpg", "jpeg", "pdf", "csv", "xlsx", "xls"],
-    help="Formati supportati: PNG, JPG, JPEG, PDF, CSV, XLSX, XLS",
+    type=["png", "jpg", "jpeg", "pdf", "csv", "xlsx", "xls", "ods"],
+    help="Formati supportati: PNG, JPG, JPEG, PDF, CSV, XLSX, XLS, ODS",
 )
 
 if uploaded_file is not None:
@@ -1413,10 +1510,8 @@ if uploaded_file is not None:
     df_input = None
 
     try:
-        if ext in [".xlsx", ".xls"]:
-            df_input = pd.read_excel(uploaded_file, dtype=str)
-        elif ext == ".csv":
-            df_input = pd.read_csv(uploaded_file, dtype=str)
+        if ext in [".xlsx", ".xls", ".ods", ".csv"]:
+            df_input = leggi_file_tabellare(uploaded_file.getvalue(), ext)
         elif ext in [".png", ".jpg", ".jpeg", ".pdf"]:
             if not st.session_state.gemini_api_key:
                 st.error(
@@ -1462,7 +1557,6 @@ if uploaded_file is not None:
 
     st.write(f"**File caricato:** `{file_name}` — **Righe totali:** `{len(df_backup)}`")
 
-    # Riepilogo suddivisione meccanica nei 3 fogli + privacy
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Foglio 1: Solo_Email", len(fogli_lavoro["Solo_Email"]))
     c2.metric("Foglio 2: Solo_Telefono", len(fogli_lavoro["Solo_Telefono"]))
@@ -1560,8 +1654,6 @@ if uploaded_file is not None:
                     f"Tempo stimato rimanente: **{formatta_tempo(tempo_rimanente)}**"
                 )
 
-                # PRE-VERIFICA FISCALE: se P.IVA o C.F. sono già presenti, interroga subito Ufficio Camerale
-                # per confermare i dati e recuperare località/CAP a supporto di Google Maps
                 piva_pre, cf_pre, citta_fiscale, cap_fiscale = "", "", "", ""
                 if piva_nota or cf_noto:
                     piva_pre, cf_pre, citta_fiscale, cap_fiscale = cerca_su_ufficio_camerale(
@@ -1574,7 +1666,6 @@ if uploaded_file is not None:
 
                 loc_per_maps = localita or citta_fiscale
 
-                # LIVELLO 1: Google Places API (Maps) + omonimie
                 candidati_maps = cerca_su_google_places(
                     azienda,
                     loc_per_maps,
@@ -1591,7 +1682,6 @@ if uploaded_file is not None:
                     indirizzo_maps = dati_maps.get("Indirizzo", "")
                     cap_maps = dati_maps.get("CAP", "") or cap_fiscale
 
-                    # PRIORITÀ 1 FISCALE: Ufficio Camerale (se non già risolto con P.IVA/CF)
                     piva_finale = piva_pre or piva_nota
                     cf_finale = cf_pre or cf_noto
                     if not piva_finale:
@@ -1607,7 +1697,6 @@ if uploaded_file is not None:
                         cf_finale = cf_uc or cf_finale
                         time.sleep(0.4)
 
-                    # LIVELLO 2: Sito Web da Maps
                     email_sito = ""
                     tel_sito = ""
                     pive_sito = []
@@ -1630,7 +1719,6 @@ if uploaded_file is not None:
                         piva_finale = seleziona_migliore(pive_sito)
                         cf_finale = seleziona_migliore(cf_sito) if cf_sito else piva_finale
 
-                    # Decide se serve DuckDuckGo in base al foglio di lavoro assegnato
                     serve_email = nome_foglio in ("Solo_Email", "Email_e_Telefono") and not email_sito
                     serve_tel = nome_foglio in ("Solo_Telefono", "Email_e_Telefono") and not (
                         dati_maps["Telefono_Maps"] or tel_sito
@@ -1666,7 +1754,6 @@ if uploaded_file is not None:
                         )
                         time.sleep(0.2)
 
-                    # Se Maps non aveva sito web ma DuckDuckGo ha trovato un sito, scansionalo
                     sito_finale = dati_maps.get("Sito_Web") or dati_maps.get(
                         "Sito_Web_Trovato_DDG", ""
                     )
@@ -1682,7 +1769,6 @@ if uploaded_file is not None:
                         cf_sito.extend(c_s2)
                         match_fiscale_sito = match_fiscale_sito or m_s2
 
-                    # PRIORITÀ 3 (Fallback fiscale): altri portali camerali se P.IVA ancora vuota
                     if not piva_finale:
                         piva_fb, cf_fb = cerca_piva_cf_fallback(
                             azienda,
@@ -1704,7 +1790,6 @@ if uploaded_file is not None:
                     if not cf_finale and piva_finale:
                         cf_finale = piva_finale
 
-                    # Unificazione risultati rispettando rigorosamente il foglio assegnato
                     email_trovata = (
                         unisci_valori(
                             email_sito, dati_maps.get("Email_Web", ""), lowercase=True
@@ -1758,7 +1843,6 @@ if uploaded_file is not None:
 
                     righe_dettaglio_completo.append(record_risultato)
 
-                    # Punteggio per scegliere il miglior candidato in caso di omonimia per il Puzzle 1-a-1
                     score_cand = 0
                     if match_fiscale_sito:
                         score_cand += 10
@@ -1808,7 +1892,6 @@ if uploaded_file is not None:
             k: pd.DataFrame(v) for k, v in fogli_elaborati_out.items()
         }
 
-        # STEP 4 & 5: Riallineamento Puzzle + Formattazione celle nuove in ROSSO
         df_finale, excel_bytes, stats = riallinea_puzzle_e_crea_excel(
             df_backup=df_backup,
             risultati_primari_per_id=risultati_primari_per_id,

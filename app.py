@@ -35,8 +35,11 @@ st.set_page_config(
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        " (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
+        " (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 EMAIL_REGEX = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
@@ -274,7 +277,7 @@ L'app cerca di darti solo contatti affidabili: se non è sicura di un dato, pref
 
 Per ogni azienda controlla prima i dati fiscali (se ci sono P.IVA o C.F.) e passa su **Google Maps**, così raccoglie quasi sempre telefono, sito web, indirizzo e **media delle recensioni Google**, e dà un'occhiata al sito ufficiale dell'azienda per cercare email e recapiti.
 
-Se da Google Maps e dal sito manca ancora qualcosa di importante (email, telefono o sito), allora fa una ricerca extra su **DuckDuckGo** (e, se attivo, un recupero su **Google Search**) per provare a completare i contatti e, quando capita, recupera anche i link ai social o a PagineGialle/PagineBianche. Se invece i contatti principali sono già stati trovati, non perde tempo con ricerche in più.
+Se da Google Maps e dal sito manca ancora qualcosa di importante (email, telefono o sito), allora fa una ricerca extra su **DuckDuckGo** (anche direttamente sul dominio del sito ufficiale e, se attivo, un recupero su **Google Search**) per provare a completare i contatti e, quando capita, recupera anche i link ai social o a PagineGialle/PagineBianche. Se invece i contatti principali sono già stati trovati, non perde tempo con ricerche in più.
 
 ### La tua privacy
 I tuoi contatti già salvati **non vengono mai letti** dai motori di ricerca o dai servizi esterni durante la ricerca: l'app li nasconde prima di partire e li rimette a posto solo alla fine, via codice.
@@ -402,7 +405,7 @@ def valore_presente(val):
 
 
 def pulisci_nome_azienda(nome):
-    """Rimuove tutte le forme giuridiche italiane (sigle ed estese) che ostacolano la ricerca."""
+    """Rimuove tutte le forme giuridiche italiane (sigle ed estese)."""
     pulito = re.sub(
         r"\b("
         r"s\.?r\.?l\.?s?|s\.?p\.?a\.?|s\.?n\.?c\.?|s\.?a\.?s\.?|s\.?c\.?a\.?r\.?l\.?|"
@@ -424,10 +427,7 @@ def pulisci_nome_azienda(nome):
 def estrai_nome_commerciale(nome):
     """
     Estrae il nome commerciale breve da ragioni sociali lunghe di SNC/SAS/farmacie/agenzie.
-    Esempi:
-    - 'FARMACIA DEI VELIERI DEI DOTTORI MUSCOLO LUISA... SOCIETA IN NOME COLLETTIVO' -> 'FARMACIA DEI VELIERI'
-    - 'BMZ S.A.S DI MASTRODONATO GIANLUCA E C.' -> 'BMZ'
-    - 'FM FINANCIAL ITALIA AGENZIA IN ATTIVITA FINANZIARIA SRLS' -> 'FM FINANCIAL ITALIA'
+    Esempio: 'FARMACIA DEI VELIERI DEI DOTTORI MUSCOLO... SOCIETA IN NOME COLLETTIVO' -> 'FARMACIA DEI VELIERI'
     """
     base = pulisci_nome_azienda(nome)
     patterns_taglio = [
@@ -441,7 +441,6 @@ def estrai_nome_commerciale(nome):
         if len(candidato) >= 3:
             risultato = candidato
 
-    # Se resta ancora lunghissimo (> 6 parole) e contiene " di ", prova a prendere la parte prima
     if len(risultato.split()) > 6 and re.search(r"\s+di\s+", risultato, flags=re.IGNORECASE):
         prima = re.split(r"\s+di\s+", risultato, maxsplit=1, flags=re.IGNORECASE)[0].strip(" -.,'")
         if len(prima) >= 4:
@@ -473,6 +472,14 @@ def estrai_dominio(url):
         return parsed.netloc.lower().replace("www.", "")
     except Exception:
         return ""
+
+
+def radice_dominio(dominio):
+    """Restituisce la parte principale del dominio senza TLD (es. 'farmaciadeivelieri.it' -> 'farmaciadeivelieri')."""
+    if not dominio:
+        return ""
+    parti = dominio.lower().replace("www.", "").split(".")
+    return parti[-2] if len(parti) >= 2 else parti[0]
 
 
 def valida_piva(piva):
@@ -528,7 +535,7 @@ def normalizza_cf_input(val):
 
 
 def decodifica_cfemail(hex_str):
-    """Decodifica le email protette dall'offuscamento Cloudflare (data-cfemail)."""
+    """Decodifica email protette dall'offuscamento Cloudflare (data-cfemail)."""
     try:
         r = int(hex_str[:2], 16)
         return "".join(
@@ -772,13 +779,11 @@ def _match_singolo_nome(nome_ref, nome_trovato):
     cov_a = len(comuni) / len(tok_a)
     cov_b = len(comuni) / len(tok_b)
 
-    # 1 parola (es. 'PROGRESS' vs 'Work in Progress Italia'): evita falsi match
     if len(tok_a) == 1:
         return cov_a == 1.0 and cov_b >= 0.50
     if len(tok_a) == 2:
         return len(comuni) == 2 and cov_b >= 0.50
 
-    # Se il nome trovato (es. 'Farmacia Dei Velieri') è interamente contenuto nella ragione sociale lunga (>= 2 parole)
     if len(comuni) >= 2 and cov_b >= 0.80:
         return True
 
@@ -786,11 +791,6 @@ def _match_singolo_nome(nome_ref, nome_trovato):
 
 
 def nomi_corrispondono_stretto(nome_cercato, nome_trovato):
-    """
-    Confronta il nome trovato sia con la denominazione completa sia con il
-    nome commerciale breve (es. 'Farmacia dei Velieri' da una SNC lunga con i soci),
-    evitando falsi match su parole singole generiche (es. 'Progress' != 'Work in Progress').
-    """
     if _match_singolo_nome(nome_cercato, nome_trovato):
         return True
     nome_breve = estrai_nome_commerciale(nome_cercato)
@@ -870,7 +870,7 @@ def formatta_tempo(secondi):
 
 
 def ddg_cerca_con_retry(query, max_results=6):
-    """Esegue la query DuckDuckGo con retry automatico se il motore risponde vuoto per rate-limit."""
+    """Esegue la query DuckDuckGo con retry automatico se il motore risponde vuoto."""
     for tentativo in range(2):
         try:
             with DDGS() as ddgs:
@@ -885,6 +885,7 @@ def ddg_cerca_con_retry(query, max_results=6):
 
 
 def rileva_colonne_tabella(df):
+    """Individua meccanicamente le colonne dando priorità a Email prima di PEC e Comune prima di Provincia."""
     colonne = list(df.columns)
 
     def trova_colonna(parole_chiave, esclusioni=()):
@@ -909,13 +910,15 @@ def rileva_colonne_tabella(df):
         )
     )
     col_localita = trova_colonna(
-        ["citta", "città", "localita", "località", "comune", "sede", "provincia"],
+        ["citta", "città", "comune", "localita", "località"],
         esclusioni=["maps"],
-    )
+    ) or trova_colonna(["sede", "provincia"], esclusioni=["maps"])
+
     col_email = trova_colonna(
-        ["email", "e-mail", "mail", "pec"],
-        esclusioni=["nuov", "trovat", "web"],
-    )
+        ["email", "e-mail", "mail"],
+        esclusioni=["nuov", "trovat", "web", "pec"],
+    ) or trova_colonna(["pec"], esclusioni=["nuov", "trovat", "web"])
+
     col_telefono = trova_colonna(
         ["telefono", "telefon", "tel", "cellulare", "cell", "phone", "fisso", "mobile"],
         esclusioni=["nuov", "trovat", "maps", "web"],
@@ -1069,10 +1072,8 @@ def cerca_su_ufficio_camerale(
 ):
     """
     Cerca l'azienda su ufficiocamerale.it:
-    - Se P.IVA o C.F. sono noti: accetta una scheda SOLO se contiene esplicitamente
-      quella P.IVA o quel C.F.
-    - Se non sono noti: usa il nome commerciale breve + verifica stretta nome e sede.
-    Restituisce: (piva_verificata, cf_verificato, citta_sede, cap_sede, confermato_fiscale)
+    - Se P.IVA o C.F. sono noti: accetta una scheda SOLO se contiene quel C.F. o quella P.IVA.
+    - Gestisce correttamente gli indirizzi tipo '00121 - ROMA (RM)' con trattino.
     """
     nome_breve = estrai_nome_commerciale(nome_azienda)
     ha_chiave_nota = bool(piva_nota or cf_noto)
@@ -1106,7 +1107,7 @@ def cerca_su_ufficio_camerale(
             titolo_pag = titolo_item
 
             try:
-                resp = requests.get(link, headers=HEADERS, timeout=(3, 5), verify=False)
+                resp = requests.get(link, headers=HEADERS, timeout=(4, 6), verify=False)
                 if resp.status_code == 200:
                     soup = BeautifulSoup(resp.text, "html.parser")
                     if soup.title and soup.title.string:
@@ -1158,10 +1159,11 @@ def cerca_su_ufficio_camerale(
             if not match_fisc and (citta or cap or indirizzo) and calcola_concordanza_indirizzo(testo_completo, indirizzo, cap, citta) < 2:
                 continue
 
+            # Gestisce sia "00121 ROMA (RM)" sia "00121 - ROMA (RM)"
             cap_trovato = ""
             citta_trovata = ""
             m_loc = re.search(
-                r"\b(\d{5})\s+([A-ZÀ-Ü][a-zà-üA-ZÀ-Ü'\s-]{2,25}?)\s*\([A-Z]{2}\)",
+                r"\b(\d{5})[\s\-–]+([A-ZÀ-Ü][a-zà-üA-ZÀ-Ü'\s-]{2,25}?)\s*\([A-Z]{2}\)",
                 testo_completo,
             )
             if m_loc:
@@ -1205,10 +1207,6 @@ def cerca_su_google_places(
     cap_hint="",
     persona_senza_sede=False,
 ):
-    """
-    Interroga Google Places API (New) usando il nome commerciale breve (es. 'Farmacia dei Velieri')
-    così non fallisce su ragioni sociali lunghe di SNC/SAS, raccogliendo sempre anche la media recensioni.
-    """
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
@@ -1354,7 +1352,66 @@ def cerca_su_google_places(
 
 
 # ==========================================
-# LIVELLO 2: ESTRAZIONE DA SITO WEB (JSON-LD + CLOUDFLARE + VERIFICA IDENTITÀ)
+# FALLBACK MIRATO SUL DOMINIO UFFICIALE (BYPASSA WAF / JS / TIMEOUT)
+# ==========================================
+def cerca_contatti_su_dominio_ddg(dominio, piva_nota="", cf_noto=""):
+    """
+    Se abbiamo già il dominio ufficiale verificato (es. farmaciadeivelieri.it)
+    ma lo scraping diretto non ha trovato la mail (WAF/Cloudflare/timeout/JS),
+    interroga DuckDuckGo con `site:<dominio>` leggendo direttamente gli snippet
+    di /contatti/, /privacy/ e homepage di QUEL SOLO DOMINIO.
+    """
+    if not dominio:
+        return "", "", [], False
+
+    emails = []
+    telefoni = []
+    pive = []
+    match_fiscale = False
+
+    queries = [
+        f"site:{dominio} email OR contatti OR mail OR privacy",
+        f'site:{dominio} "@"',
+    ]
+
+    for q_idx, q in enumerate(queries):
+        items = ddg_cerca_con_retry(q, max_results=6)
+        for item in items:
+            link = item.get("href", "")
+            if estrai_dominio(link) != dominio:
+                continue
+            snippet = item.get("title", "") + " " + item.get("body", "")
+            em_s, tel_s = estrai_contatti_da_testo_sicuri(
+                snippet, piva_nota=piva_nota, cf_noto=cf_noto
+            )
+            emails.extend(em_s)
+            telefoni.extend(tel_s)
+
+            p_s, _ = estrai_dati_fiscali_da_testo(snippet)
+            pive.extend(p_s)
+            if testo_contiene_chiave_fiscale(snippet, piva_nota, cf_noto):
+                match_fiscale = True
+
+        if emails:
+            break
+        if q_idx == 0:
+            time.sleep(0.4)
+
+    radice = radice_dominio(dominio)
+    emails_uniche = list(dict.fromkeys(emails))
+    emails_uniche.sort(
+        key=lambda e: (0 if radice and radice in e.split("@")[-1] else 1, e)
+    )
+    return (
+        unisci_valori(*emails_uniche, lowercase=True, max_items=2),
+        unisci_valori(*telefoni, lowercase=False, max_items=2),
+        pive,
+        match_fiscale,
+    )
+
+
+# ==========================================
+# LIVELLO 2: ESTRAZIONE DA SITO WEB (JSON-LD + CLOUDFLARE + SITE: FALLBACK)
 # ==========================================
 def estrai_dati_da_sito(
     url_sito,
@@ -1366,13 +1423,17 @@ def estrai_dati_da_sito(
     da_google_maps=False,
 ):
     """
-    Visita homepage + fino a 3 pagine contatti/chi-siamo/privacy:
-    - Legge anche JSON-LD (Schema.org) e email protette Cloudflare (data-cfemail).
-    - Verifica che il sito appartenga davvero all'impresa (match P.IVA/C.F. o nome breve + sede).
+    Visita homepage + pagine contatti/privacy (anche dirette /contatti/, /privacy/):
+    - Legge JSON-LD (Schema.org), data-cfemail Cloudflare, mailto:, tel: e testo.
+    - Se lo scraping diretto è bloccato o non trova email su un dominio già coerente/Maps,
+      esegue subito `site:<dominio>` su DuckDuckGo.
     Restituisce: (verificato, motivo, email_str, tel_str, pive_trovate, cf_trovati, match_fiscale, conflitto_fiscale, socials_dict)
     """
     if not sembra_sito_ufficiale(url_sito):
         return False, "", "", "", [], [], False, False, {}
+
+    dominio_base = estrai_dominio(url_sito)
+    radice_dom = radice_dominio(dominio_base)
 
     emails_trovate = []
     em_viste = set()
@@ -1384,6 +1445,7 @@ def estrai_dati_da_sito(
     match_fiscale = False
     titoli_pagine = []
     testo_cumulato = []
+    url_scansionati = set()
 
     def aggiungi_email(em):
         em_low = em.strip().lower()
@@ -1403,9 +1465,13 @@ def estrai_dati_da_sito(
 
     def scansiona_pagina(target_url):
         nonlocal match_fiscale
+        url_norm = target_url.rstrip("/")
+        if url_norm in url_scansionati:
+            return None
+        url_scansionati.add(url_norm)
         try:
             resp = requests.get(
-                target_url, headers=HEADERS, timeout=(3, 5), verify=False
+                target_url, headers=HEADERS, timeout=(5, 10), verify=False
             )
             if resp.status_code != 200:
                 return None
@@ -1414,7 +1480,7 @@ def estrai_dati_da_sito(
             if soup.title and soup.title.string:
                 titoli_pagine.append(soup.title.string.strip().lower())
 
-            # 1. Estrae PRIMA dai dati strutturati JSON-LD (prima di rimuovere <script>)
+            # 1. JSON-LD (Schema.org) prima di rimuovere <script>
             em_ld, tel_ld, pive_ld, soc_ld = estrai_da_jsonld(
                 soup, piva_nota=piva_nota, cf_noto=cf_noto
             )
@@ -1427,7 +1493,7 @@ def estrai_dati_da_sito(
                 if sk not in socials_sito:
                     socials_sito[sk] = sv
 
-            # 2. Decodifica eventuali email offuscate Cloudflare (data-cfemail)
+            # 2. Email protette Cloudflare (data-cfemail)
             for cf_el in soup.find_all(attrs={"data-cfemail": True}):
                 dec = decodifica_cfemail(cf_el.get("data-cfemail", ""))
                 if "@" in dec:
@@ -1436,7 +1502,7 @@ def estrai_dati_da_sito(
             for tag in soup.find_all(["script", "style", "noscript"]):
                 tag.decompose()
 
-            # 3. Link mailto: e tel: + eventuali link social
+            # 3. Link mailto:, tel: e social
             for a in soup.find_all("a", href=True):
                 href = a["href"].strip()
                 href_low = href.lower()
@@ -1475,20 +1541,41 @@ def estrai_dati_da_sito(
             return None
 
     soup_home = scansiona_pagina(url_sito)
+
+    # Se la homepage è bloccata (WAF/403/timeout) ma il sito arriva da Google Maps (o dominio coerente),
+    # interroga subito site:<dominio> su DuckDuckGo prima di arrendersi!
     if soup_home is None:
+        nome_breve = estrai_nome_commerciale(nome_azienda)
+        tokens_az = token_significativi_azienda(nome_breve) or token_significativi_azienda(nome_azienda)
+        match_dom = any(t in dominio_base for t in tokens_az if len(t) >= 3)
+        if da_google_maps or match_dom:
+            em_d, tel_d, p_d, mf_d = cerca_contatti_su_dominio_ddg(
+                dominio_base, piva_nota=piva_nota, cf_noto=cf_noto
+            )
+            piva_d = seleziona_migliore(p_d)
+            if piva_nota and piva_d and piva_d != piva_nota and not mf_d:
+                return False, "", "", "", [], [], False, True, {}
+            if mf_d or da_google_maps or (match_dom and (em_d or tel_d)):
+                motivo_d = (
+                    "Alta (Dominio verificato P.IVA/CF via Web)"
+                    if mf_d
+                    else "Alta (Google Maps + Dominio indicizzato)"
+                )
+                return True, motivo_d, em_d, tel_d, p_d, [], mf_d, False, {}
         return False, "", "", "", [], [], False, False, {}
 
     if len(set(pive_trovate)) >= 4 and not match_fiscale:
         return False, "", "", "", [], [], False, False, {}
 
-    dominio_base = estrai_dominio(url_sito)
+    # Visita le sottopagine contatti/privacy trovate in HTML + percorsi standard italiani se serve ancora la mail
     if (
         len(emails_trovate) == 0
         or len(telefoni_trovati) == 0
         or len(pive_trovate) == 0
         or (bool(piva_nota or cf_noto) and not match_fiscale)
     ):
-        pagine_da_visitare = set()
+        pagine_da_visitare = []
+        viste_pag = set()
         for a in soup_home.find_all("a", href=True):
             href = a["href"].lower()
             if any(
@@ -1496,9 +1583,9 @@ def estrai_dati_da_sito(
                 for p in [
                     "contatt",
                     "contact",
+                    "privacy",
                     "chi-siamo",
                     "about",
-                    "privacy",
                     "dove-siamo",
                     "info",
                     "note-legali",
@@ -1506,22 +1593,31 @@ def estrai_dati_da_sito(
                 ]
             ):
                 link_completo = urljoin(url_sito, a["href"])
-                if estrai_dominio(link_completo) == dominio_base:
-                    pagine_da_visitare.add(link_completo)
+                if estrai_dominio(link_completo) == dominio_base and link_completo not in viste_pag:
+                    viste_pag.add(link_completo)
+                    pagine_da_visitare.append(link_completo)
 
-        for link in list(pagine_da_visitare)[:3]:
+        for link in pagine_da_visitare[:4]:
             scansiona_pagina(link)
             if (
-                len(emails_trovate) > 2
+                len(emails_trovate) > 1
                 and len(telefoni_trovati) > 0
                 and (match_fiscale or len(pive_trovate) > 0)
             ):
                 break
 
+        # Se ancora nessuna email trovata, prova direttamente i percorsi /contatti/ e /privacy/
+        if len(emails_trovate) == 0:
+            parsed_root = urllib.parse.urlparse(url_sito)
+            base_origin = f"{parsed_root.scheme}://{parsed_root.netloc}"
+            for path_std in ["/contatti/", "/privacy/", "/privacy-policy/"]:
+                scansiona_pagina(base_origin + path_std)
+                if len(emails_trovate) > 0:
+                    break
+
     if len(set(pive_trovate)) >= 5 and not match_fiscale:
         return False, "", "", "", [], [], False, False, {}
 
-    # CONFLITTO FISCALE: il sito appartiene a un'ALTRA P.IVA rispetto alla nostra
     piva_sito = seleziona_migliore(pive_trovate)
     if piva_nota and piva_sito and piva_sito != piva_nota and not match_fiscale:
         return False, "", "", "", [], [], False, True, {}
@@ -1567,9 +1663,23 @@ def estrai_dati_da_sito(
     if not verificato:
         return False, "", "", "", [], [], False, False, {}
 
+    # Se il sito è verificato ma non ha restituito email via HTML (es. pagina JS), prova site:<dominio> su DDG
+    if not emails_trovate:
+        em_d, tel_d, p_d, mf_d = cerca_contatti_su_dominio_ddg(
+            dominio_base, piva_nota=piva_nota, cf_noto=cf_noto
+        )
+        for e in [x.strip() for x in em_d.split(",") if x.strip()]:
+            aggiungi_email(e)
+        for t in [x.strip() for x in tel_d.split(",") if x.strip()]:
+            aggiungi_tel(t)
+        pive_trovate.extend(p_d)
+        if mf_d:
+            match_fiscale = True
+            motivo = "Alta (Sito verificato con P.IVA/CF)"
+
     emails_ordinate = sorted(
         emails_trovate,
-        key=lambda e: (0 if dominio_base and dominio_base in e.split("@")[-1] else 1, e),
+        key=lambda e: (0 if radice_dom and radice_dom in e.split("@")[-1] else 1, e),
     )[:2]
     telefoni_finali = telefoni_trovati[:2]
 
@@ -1587,7 +1697,7 @@ def estrai_dati_da_sito(
 
 
 # ==========================================
-# LIVELLO 3: RICERCA WEB ESTESA DUCKDUCKGO (P.IVA DA SOLA + NOME BREVE)
+# LIVELLO 3: RICERCA WEB ESTESA DUCKDUCKGO (P.IVA DA SOLA + DOMINIO VERIFICATO)
 # ==========================================
 def visita_scheda_terza_verificata(
     url, nome_azienda, citta="", cap="", piva_nota="", cf_noto=""
@@ -1615,7 +1725,7 @@ def visita_scheda_terza_verificata(
         return [], [], [], []
 
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=(3, 4), verify=False)
+        resp = requests.get(url, headers=HEADERS, timeout=(4, 6), verify=False)
         if resp.status_code != 200:
             return [], [], [], []
 
@@ -1683,11 +1793,13 @@ def cerca_su_duckduckgo_web(
     piva_nota="",
     cf_noto="",
     cerca_sito_ufficiale=True,
+    dominio_verificato="",
 ):
     """
     Ricerca Web su DuckDuckGo potenziata:
-    1. Query con la SOLA P.IVA (aggancia siti ufficiali anche se il brand differisce dal nome legale).
-    2. Query con il nome commerciale breve + località.
+    1. Se abbiamo già il dominio ufficiale verificato, accetta subito email/tel dagli snippet di quel dominio.
+    2. Cerca con la SOLA P.IVA (aggancia il sito ufficiale anche con brand diverso dal nome legale).
+    3. Cerca con il nome commerciale breve + località.
     """
     nome_breve = estrai_nome_commerciale(nome_azienda)
     tokens_az = token_significativi_azienda(nome_breve) or token_significativi_azienda(nome_azienda)
@@ -1737,15 +1849,18 @@ def cerca_su_duckduckgo_web(
             titolo_item = item.get("title", "")
             snippet = titolo_item + " " + item.get("body", "")
             link_lower = link.lower()
+            dom_link = estrai_dominio(link)
 
             match_fisc_snip = testo_contiene_chiave_fiscale(
                 snippet, piva_nota, cf_noto
             )
+            match_dom_verificato = bool(dominio_verificato and dom_link == dominio_verificato)
             match_nome_snip = nomi_corrispondono_stretto(nome_azienda, titolo_item) or (
                 sum(1 for t in tokens_az if t in snippet.lower()) >= max(1, min(2, len(tokens_az)))
             )
 
-            if match_fisc_snip:
+            # Estrae email/tel dallo snippet se contiene P.IVA/C.F. OPPURE se appartiene al dominio ufficiale verificato
+            if match_fisc_snip or match_dom_verificato:
                 em_sn, tel_sn = estrai_contatti_da_testo_sicuri(
                     snippet, piva_nota=piva_nota, cf_noto=cf_noto
                 )
@@ -1790,7 +1905,7 @@ def cerca_su_duckduckgo_web(
                 if len(altri_link) < 3 and (match_fisc_snip or match_nome_snip):
                     altri_link.append(link)
 
-        if q_idx == 0 and len(queries) > 1 and (emails_totali and telefoni_totali and candidati_sito):
+        if q_idx == 0 and len(queries) > 1 and (emails_totali and telefoni_totali and (candidati_sito or dominio_verificato)):
             break
         if q_idx == 0 and len(queries) > 1:
             time.sleep(0.5)
@@ -1852,8 +1967,8 @@ def cerca_con_gemini_google_search(
 ):
     """
     Si attiva SOLO quando mancano ancora email, telefono o sito web.
-    Interroga Google Search reale tramite Gemini 2.5 Flash usando ESCLUSIVAMENTE
-    Denominazione, P.IVA/C.F. e località (NON riceve mai i contatti originali del file).
+    Usa ESCLUSIVAMENTE Denominazione, P.IVA/C.F. e località (mai i contatti del file originale).
+    Restituisce: (risultato_dict, messaggio_errore_api)
     """
     vuoto = {
         "email": "",
@@ -1865,7 +1980,7 @@ def cerca_con_gemini_google_search(
         "cap": "",
     }
     if not gemini_api_key:
-        return vuoto
+        return vuoto, ""
 
     nome_breve = estrai_nome_commerciale(nome_azienda)
     prompt = (
@@ -1879,7 +1994,7 @@ def cerca_con_gemini_google_search(
         "1. Restituisci SOLO dati trovati esplicitamente nei risultati di Google Search per QUESTA ESATTA impresa "
         "(se P.IVA o C.F. sono noti, verifica che corrispondano e NON prendere dati di aziende omonime).\n"
         "2. NON inventare né indovinare mai email, telefoni o siti web. Se un dato non è certo, lascia stringa vuota \"\".\n"
-        "3. NON inserire directory o portali (come ufficiocamerale.it, paginegialle.it, reportaziende.it, money.it, facebook.com) nel campo sito_web.\n"
+        "3. NON inserire directory o portali (ufficiocamerale.it, paginegialle.it, reportaziende.it, money.it, facebook.com) nel campo sito_web.\n"
         "4. NON inserire la Partita IVA nel campo telefono.\n"
         "Rispondi ESCLUSIVAMENTE con un oggetto JSON valido con queste chiavi esatte:\n"
         '{"sito_web": "", "email": "", "pec": "", "telefono": "", "piva": "", "citta": "", "cap": ""}'
@@ -1898,11 +2013,11 @@ def cerca_con_gemini_google_search(
         testo_resp = (response.text or "").strip()
         m_json = re.search(r"\{.*\}", testo_resp, flags=re.DOTALL)
         if not m_json:
-            return vuoto
+            return vuoto, ""
 
         dati = json.loads(m_json.group(0))
         if not isinstance(dati, dict):
-            return vuoto
+            return vuoto, ""
 
         sito = str(dati.get("sito_web", "") or "").strip()
         if sito and not sito.startswith(("http://", "https://")):
@@ -1911,9 +2026,8 @@ def cerca_con_gemini_google_search(
             sito = ""
 
         piva_g = normalizza_piva_input(dati.get("piva", ""))
-        # Se avevamo già una P.IVA nota e Gemini ha trovato un'azienda con P.IVA DIVERSA -> scarta tutto!
         if piva_nota and piva_g and piva_g != piva_nota:
-            return vuoto
+            return vuoto, ""
 
         email_raw = str(dati.get("email", "") or "").strip()
         emails_valide = [
@@ -1944,17 +2058,20 @@ def cerca_con_gemini_google_search(
         cap_g = re.sub(r"\D", "", str(dati.get("cap", "") or ""))
         cap_g = cap_g if len(cap_g) == 5 else ""
 
-        return {
-            "email": unisci_valori(*emails_valide, lowercase=True, max_items=2),
-            "pec": unisci_valori(*pec_valide, lowercase=True, max_items=1),
-            "telefono": unisci_valori(*tels_validi, lowercase=False, max_items=2),
-            "sito_web": sito,
-            "piva": piva_g,
-            "citta": str(dati.get("citta", "") or "").strip(),
-            "cap": cap_g,
-        }
-    except Exception:
-        return vuoto
+        return (
+            {
+                "email": unisci_valori(*emails_valide, lowercase=True, max_items=2),
+                "pec": unisci_valori(*pec_valide, lowercase=True, max_items=1),
+                "telefono": unisci_valori(*tels_validi, lowercase=False, max_items=2),
+                "sito_web": sito,
+                "piva": piva_g,
+                "citta": str(dati.get("citta", "") or "").strip(),
+                "cap": cap_g,
+            },
+            "",
+        )
+    except Exception as exc:
+        return vuoto, str(exc)
 
 
 def cerca_piva_cf_fallback(
@@ -2071,12 +2188,12 @@ def pulisci_duplicati_trasversali(risultati_primari_per_id, df_backup, cols_map)
                 continue
             nome_b = estrai_nome_commerciale(res.get("Azienda_Ricerca", ""))
             tokens_az = token_significativi_azienda(nome_b)
-            dominio_sito = estrai_dominio(res.get("Sito_Web_Trovato", ""))
+            rad_sito = radice_dominio(estrai_dominio(res.get("Sito_Web_Trovato", "")))
             tenute = []
             for singola in [e.strip().lower() for e in str(em).split(",") if e.strip()]:
                 if singola in email_duplicate:
                     loc_em, _, dom_em = singola.partition("@")
-                    coerente = (bool(dominio_sito) and dominio_sito in dom_em) or any(
+                    coerente = (bool(rad_sito) and rad_sito in dom_em) or any(
                         t in loc_em or t in dom_em for t in tokens_az if len(t) >= 3
                     )
                     if not coerente:
@@ -2093,17 +2210,6 @@ def riallinea_e_crea_excel_2_fogli(
     risultati_primari_per_id,
     cols_map,
 ):
-    """
-    Costruisce esattamente 2 fogli Excel:
-    - FOGLIO 1 ('Contatti_Principali'):
-      Denominazione | P.IVA | C.F. | Email | Email nuova | Telefono | Telefono nuovo | Sito Web
-      * Email vuota nel file originale -> nuova email in 'Email' (ROSSO).
-      * Email presente nel file originale -> originale in 'Email' (NERO), nuova email in 'Email nuova' (ROSSO).
-      * Telefono vuoto nel file originale -> nuovo telefono in 'Telefono' (ROSSO).
-      * Telefono presente nel file originale -> originale in 'Telefono' (NERO), nuovo telefono in 'Telefono nuovo' (ROSSO).
-    - FOGLIO 2 ('Altre_Colonne_e_Dettagli'):
-      Denominazione | P.IVA | C.F. | <altre colonne originali> | Valutazione_Media | Numero_Recensioni | <altri dettagli>
-    """
     risultati_primari_per_id = pulisci_duplicati_trasversali(
         risultati_primari_per_id, df_backup, cols_map
     )
@@ -2546,6 +2652,7 @@ if uploaded_file is not None:
         col_localita = cols_map["localita"]
 
         risultati_primari_per_id = {}
+        gemini_disabilitato_errore = False
 
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
@@ -2632,7 +2739,7 @@ if uploaded_file is not None:
                     cf_finale = cf_uc or cf_finale
                     time.sleep(0.35)
 
-                # LIVELLO 2: Sito Web da Google Maps + JSON-LD + Cloudflare + verifica identità
+                # LIVELLO 2: Sito Web da Google Maps + JSON-LD + Cloudflare + fallback site:<dominio>
                 sito_verificato = ""
                 motivo_verifica = ""
                 email_sito = ""
@@ -2708,12 +2815,13 @@ if uploaded_file is not None:
                         piva_nota=piva_finale,
                         cf_noto=cf_finale,
                         cerca_sito_ufficiale=manca_sito,
+                        dominio_verificato=estrai_dominio(sito_verificato),
                     )
                     dati_maps.update(dati_web)
                     if not sito_verificato and dati_web.get("Sito_Web_Trovato_DDG"):
                         sito_verificato = dati_web["Sito_Web_Trovato_DDG"]
                         motivo_verifica = dati_web.get("Motivo_Verifica_DDG", "")
-                    time.sleep(0.6)
+                    time.sleep(0.5)
                 else:
                     dati_maps.update(
                         {
@@ -2746,10 +2854,11 @@ if uploaded_file is not None:
 
                 if (
                     usa_gemini_search
+                    and not gemini_disabilitato_errore
                     and st.session_state.gemini_api_key
                     and (ancora_manca_email or ancora_manca_tel or ancora_manca_sito)
                 ):
-                    res_g = cerca_con_gemini_google_search(
+                    res_g, err_g = cerca_con_gemini_google_search(
                         nome_azienda=azienda,
                         localita=loc_effettiva,
                         indirizzo=indirizzo_maps,
@@ -2757,13 +2866,22 @@ if uploaded_file is not None:
                         cf_noto=cf_finale,
                         gemini_api_key=st.session_state.gemini_api_key,
                     )
+                    if err_g:
+                        err_low = err_g.lower()
+                        if any(k in err_low for k in ["api_key", "permission", "denied", "disabled", "403", "400", "not found"]):
+                            gemini_disabilitato_errore = True
+                            st.warning(
+                                "Il recupero via Google Search (Gemini) non è attivo con questa API Key "
+                                "(probabilmente la chiave Google Maps non ha abilitata la Generative Language API). "
+                                "Se vuoi usarlo, clicca su 'Cambia API Key' e inserisci una Gemini API Key separata da Google AI Studio."
+                            )
+
                     if res_g.get("pec"):
                         pec_trovata = res_g["pec"]
                     if not piva_finale and res_g.get("piva"):
                         piva_finale = res_g["piva"]
                         cf_finale = cf_finale or piva_finale
 
-                    # Se Gemini ha trovato un sito web nuovo, scansionalo direttamente per estrarre/confermare email e tel!
                     if ancora_manca_sito and res_g.get("sito_web"):
                         (
                             ok_sg,

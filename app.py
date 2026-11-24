@@ -480,7 +480,6 @@ def normalizza_e_valida_telefono(
     elif cifre.startswith("39") and len(cifre) >= 11:
         cifre = cifre[2:]
 
-    # Blocco assoluto: MAI restituire una P.IVA o un C.F. come telefono
     if piva_nota and cifre == piva_nota:
         return ""
     if cf_noto and cifre == cf_noto:
@@ -488,13 +487,10 @@ def normalizza_e_valida_telefono(
     if len(cifre) == 11 and valida_piva(cifre):
         return ""
 
-    # Rifiuta cifre tutte uguali o sequenze banali
     if len(set(cifre)) <= 2 or cifre in {"0123456789", "1234567890"}:
         return ""
 
-    # Controllo prefisso e lunghezza reale dei numeri italiani
     if cifre.startswith("3"):
-        # I cellulari italiani hanno sempre esattamente 10 cifre (3xx xxxxxxx)
         if len(cifre) != 10:
             return ""
         return f"{cifre[:3]} {cifre[3:6]} {cifre[6:]}"
@@ -503,7 +499,6 @@ def normalizza_e_valida_telefono(
         max_len = 11 if da_google_maps else 10
         if not (min_len <= len(cifre) <= max_len):
             return ""
-        # Evita numeri fissi con 3+ zeri iniziali (es. 000...)
         if cifre.startswith("00"):
             return ""
         return re.sub(r"\s+", " ", pulito) if da_google_maps else cifre
@@ -725,7 +720,6 @@ def nomi_corrispondono(nome_cercato, nome_trovato):
     comuni = tok_a & tok_b
     if len(tok_a) == 1:
         return len(comuni) == 1
-    # Per nomi composti (es. "Costa Alessandro" o "Rossi Impianti"), richiede almeno 2 parole comuni o >=70%
     return len(comuni) >= 2 or (len(comuni) / len(tok_a)) >= 0.70
 
 
@@ -743,11 +737,15 @@ def rileva_colonne_tabella(df):
         return None
 
     col_azienda = (
-        "Azienda"
-        if "Azienda" in colonne
-        else trova_colonna(
-            ["azienda", "ragione", "denominazione", "impresa", "societa", "società", "ditta", "nome", "cliente"],
-            esclusioni=["file", "cognome", "referente", "maps"],
+        "Denominazione"
+        if "Denominazione" in colonne
+        else (
+            "Azienda"
+            if "Azienda" in colonne
+            else trova_colonna(
+                ["denominazione", "azienda", "ragione", "impresa", "societa", "società", "ditta", "nome", "cliente"],
+                esclusioni=["file", "cognome", "referente", "maps"],
+            )
         )
     )
     col_localita = trova_colonna(
@@ -759,7 +757,7 @@ def rileva_colonne_tabella(df):
         esclusioni=["nuov", "trovat", "web"],
     )
     col_telefono = trova_colonna(
-        ["telefono", "tel", "cellulare", "cell", "phone", "fisso", "mobile"],
+        ["telefono", "telefon", "tel", "cellulare", "cell", "phone", "fisso", "mobile"],
         esclusioni=["nuov", "trovat", "maps", "web"],
     )
     col_sito = trova_colonna(
@@ -892,8 +890,8 @@ def estrai_aziende_da_documento(file_bytes, mime_type, gemini_api_key):
         "Se accanto al nome dell'azienda sono indicati anche località/città, Partita IVA o Codice Fiscale, estraili. "
         "NON estrarre email, numeri di telefono o siti web. "
         "Restituisci ESCLUSIVAMENTE un array JSON valido di oggetti con chiavi "
-        "'Azienda', 'Localita', 'P.IVA' e 'C.F.' (stringa vuota se non presente). "
-        'Esempio: [{"Azienda": "Rossi Srl", "Localita": "Milano", "P.IVA": "01234567890", "C.F.": ""}]'
+        "'Denominazione', 'Localita', 'P.IVA' e 'C.F.' (stringa vuota se non presente). "
+        'Esempio: [{"Denominazione": "Rossi Srl", "Localita": "Milano", "P.IVA": "01234567890", "C.F.": ""}]'
     )
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -908,7 +906,7 @@ def estrai_aziende_da_documento(file_bytes, mime_type, gemini_api_key):
     )
     dati = json.loads(response.text)
     if not isinstance(dati, list) or len(dati) == 0:
-        return pd.DataFrame(columns=["Azienda", "Localita", "P.IVA", "C.F."])
+        return pd.DataFrame(columns=["Denominazione", "Localita", "P.IVA", "C.F."])
     return pd.DataFrame(dati)
 
 
@@ -1103,7 +1101,6 @@ def cerca_su_google_places(nome_azienda, localita="", api_key="", cap_hint=""):
         if not places:
             return risultato_vuoto
 
-        # Accetta SOLO candidati il cui nome corrisponde davvero all'azienda cercata
         candidati = [
             p
             for p in places
@@ -1130,7 +1127,6 @@ def cerca_su_google_places(nome_azienda, localita="", api_key="", cap_hint=""):
                 if "locality" in types_list:
                     citta = comp.get("longText", "")
 
-            # Verifica geografica: se conosciamo il CAP o la città e Maps è in un'altra provincia/città, scarta
             if cap_hint and cap and cap[:2] != cap_hint[:2]:
                 continue
             if (
@@ -1190,11 +1186,7 @@ def estrai_dati_da_sito_verificato(
 ):
     """
     Scansiona un potenziale sito web ufficiale e verifica che appartenga DAVVERO
-    all'azienda prima di restituire email, telefono o sito:
-    - Scarta portali/directory (anche se contengono molte P.IVA diverse).
-    - Scarta pagine rumorose (>4 telefoni o >6 email diverse).
-    - Richiede verifica forte (match P.IVA/C.F. OPPURE sito da Maps coerente OPPURE
-      match dominio/titolo + nome azienda + eventuale località).
+    all'azienda prima di restituire email, telefono o sito.
     Restituisce: (verificato, motivo_verifica, email_str, tel_str, pive_trovate, cf_trovati, match_fiscale)
     """
     if not sembra_sito_ufficiale(url_sito):
@@ -1242,7 +1234,6 @@ def estrai_dati_da_sito_verificato(
             for tag in soup.find_all(["script", "style", "noscript"]):
                 tag.decompose()
 
-            # Estrazione strutturata da link mailto: e tel:
             for a in soup.find_all("a", href=True):
                 href = a["href"].strip()
                 if href.lower().startswith("mailto:"):
@@ -1255,7 +1246,6 @@ def estrai_dati_da_sito_verificato(
             testo = soup.get_text(" ")
             testo_cumulato.append(testo)
 
-            # Estrazione sicura da testo (solo con contesto telefonico esplicito)
             for em in estrai_email_sicure_da_testo(testo):
                 aggiungi_email(em)
             for tel in estrai_telefoni_sicuri_da_testo(
@@ -1277,12 +1267,10 @@ def estrai_dati_da_sito_verificato(
     if soup_home is None:
         return False, "", "", "", [], [], False
 
-    # Se una homepage da sola contiene > 4 P.IVA distinte (non la nostra), è un portale/elenco -> scarta!
     pive_distinte_home = set(pive_trovate)
     if len(pive_distinte_home) >= 4 and not match_fiscale:
         return False, "", "", "", [], [], False
 
-    # Scansiona fino a 3 pagine contatti/chi-siamo/privacy sullo stesso dominio
     dominio_base = estrai_dominio(url_sito)
     if (
         len(emails_trovate) == 0
@@ -1319,7 +1307,6 @@ def estrai_dati_da_sito_verificato(
             ):
                 break
 
-    # Controllo anti-directory: troppe P.IVA distinte o troppi telefoni/email = pagina elenco
     if len(set(pive_trovate)) >= 5 and not match_fiscale:
         return False, "", "", "", [], [], False
     if len(telefoni_trovati) > 4:
@@ -1327,7 +1314,6 @@ def estrai_dati_da_sito_verificato(
     if len(emails_trovate) > 6:
         emails_trovate = []
 
-    # Verifica di appartenenza del sito all'azienda
     testo_tutto = " ".join(testo_cumulato).lower()
     titoli_tutti = " ".join(titoli_pagine)
     tokens_az = token_significativi_azienda(nome_azienda)
@@ -1341,7 +1327,6 @@ def estrai_dati_da_sito_verificato(
     )
     match_geo = calcola_concordanza_indirizzo(testo_tutto, cap=cap, citta=citta) >= 2
 
-    # Se il sito riporta esplicitamente un'ALTRA P.IVA diversa dalla nostra nota, è un sito di terzi!
     piva_sito_principale = seleziona_migliore(pive_trovate)
     if piva_nota and piva_sito_principale and piva_sito_principale != piva_nota and not match_fiscale:
         return False, "", "", "", [], [], False
@@ -1363,7 +1348,6 @@ def estrai_dati_da_sito_verificato(
     if not verificato:
         return False, "", "", "", [], [], False
 
-    # Priorità alle email sullo stesso dominio del sito aziendale
     emails_ordinate = sorted(
         emails_trovate,
         key=lambda e: (0 if dominio_base and dominio_base in e.split("@")[-1] else 1, e),
@@ -1439,7 +1423,6 @@ def estrai_da_scheda_paginegialle(
                 testo, piva_nota=piva_nota, cf_noto=cf_noto
             )
 
-        # Se la pagina ha troppi numeri è un elenco di più aziende -> scarta
         if len(telefoni) > 3:
             telefoni = []
 
@@ -1461,7 +1444,6 @@ def cerca_su_duckduckgo_verificato(
     1. Individuare e VERIFICARE il sito web ufficiale (usando P.IVA/CF e nome azienda).
     2. Individuare eventuale scheda singola PagineGialle/PagineBianche verificata.
     3. Raccogliere link social coerenti.
-    NON estrae MAI numeri grezzi da portali/aggregatori come aziende.money.it o ufficiocamerale.
     """
     nome_pulito = pulisci_nome_azienda(nome_azienda)
     tokens_az = token_significativi_azienda(nome_azienda)
@@ -1523,7 +1505,7 @@ def cerca_su_duckduckgo_verificato(
                     risultato["LinkedIn"] = link
                 elif "tiktok.com" in link_lower and snippet_coerente and not risultato["TikTok"]:
                     risultato["TikTok"] = link
-                elif ("paginegialle.it" in link_lower or "paginebianche.it" in link_lower):
+                elif "paginegialle.it" in link_lower or "paginebianche.it" in link_lower:
                     if not risultato["PagineGialle_Bianche"] and snippet_coerente:
                         risultato["PagineGialle_Bianche"] = link
                         _, tel_pg = estrai_da_scheda_paginegialle(
@@ -1553,7 +1535,6 @@ def cerca_su_duckduckgo_verificato(
         except Exception:
             pass
 
-    # Verifica rigorosa fino a 3 siti ufficiali candidati (priorità al primo verificato con P.IVA/CF)
     if cerca_sito_ufficiale and candidati_sito:
         for root_url, _ in candidati_sito[:3]:
             verificato, motivo, em_s, tel_s, p_s, c_s, match_fisc = (
@@ -1644,60 +1625,64 @@ def cerca_piva_cf_fallback(
 
 # ==========================================
 # STEP 4 MECCANICO (SENZA AI):
-# RIALLINEAMENTO ("PUZZLE") + COLONNE AFFIANCATE + TESTO ROSSO
+# RIALLINEAMENTO IN 2 FOGLI + REGOLA SMART + TESTO ROSSO
 # ==========================================
-def riallinea_puzzle_e_crea_excel(
+def riallinea_e_crea_excel_2_fogli(
     df_backup,
     risultati_primari_per_id,
-    df_dettaglio_completo,
     cols_map,
 ):
     """
-    Unisce meccanicamente i nuovi risultati verificati al backup originale:
-    - Mantiene INTATTI tutti i contatti originali (colore nero).
-    - Inserisce 'Telefono nuovo' subito accanto alla colonna Telefono originale.
-    - Inserisce 'Email nuova' subito accanto alla colonna Email originale.
-    - Affianca 'Sito Web nuovo' se esiste già una colonna Sito Web (o crea 'Sito_Web').
-    - Colora di ROSSO tutte le nuove informazioni trovate.
+    Costruisce esattamente 2 fogli Excel unendo meccanicamente il backup originale
+    ai nuovi risultati verificati (senza mai esporre i contatti originali alla ricerca):
+
+    - FOGLIO 1 ('Contatti_Principali'):
+      Denominazione | P.IVA | C.F. | Email | Email nuova | Telefono | Telefono nuovo | Sito Web
+      * Se Email originale mancava -> nuova email va in 'Email' (in ROSSO).
+      * Se Email originale era presente -> resta in 'Email' (nero) e la nuova va in 'Email nuova' (in ROSSO).
+      * Se Telefono originale mancava -> nuovo telefono va in 'Telefono' (in ROSSO).
+      * Se Telefono originale era presente -> resta in 'Telefono' (nero) e il nuovo va in 'Telefono nuovo' (in ROSSO).
+      * Se Sito Web originale mancava -> nuovo sito va in 'Sito Web' (in ROSSO); se presente resta in nero (e l'eventuale nuovo sito va in Foglio 2).
+
+    - FOGLIO 2 ('Altre_Colonne_e_Dettagli'):
+      Denominazione | P.IVA | C.F. | <tutte le altre colonne originali non nel Foglio 1> | <colonne arricchimento PCF>
     """
-    df_finale = df_backup.copy(deep=True)
+    col_az_orig = cols_map["azienda"]
+    col_piva_orig = cols_map["piva"]
+    col_cf_orig = cols_map["cf"]
+    col_email_orig = cols_map["email"]
+    col_tel_orig = cols_map["telefono"]
+    col_sito_orig = cols_map["sito"]
 
-    col_tel_nuovo = "Telefono nuovo"
-    col_email_nuova = "Email nuova"
+    colonne_usate_foglio1 = {
+        c
+        for c in [
+            col_az_orig,
+            col_piva_orig,
+            col_cf_orig,
+            col_email_orig,
+            col_tel_orig,
+            col_sito_orig,
+        ]
+        if c is not None
+    }
+    altre_colonne_originali = [
+        c for c in df_backup.columns if c not in colonne_usate_foglio1
+    ]
 
-    if col_tel_nuovo not in df_finale.columns:
-        if cols_map["telefono"] and cols_map["telefono"] in df_finale.columns:
-            pos_tel = df_finale.columns.get_loc(cols_map["telefono"]) + 1
-            df_finale.insert(pos_tel, col_tel_nuovo, "")
-        else:
-            df_finale[col_tel_nuovo] = ""
+    colonne_foglio1 = [
+        "Denominazione",
+        "P.IVA",
+        "C.F.",
+        "Email",
+        "Email nuova",
+        "Telefono",
+        "Telefono nuovo",
+        "Sito Web",
+    ]
 
-    if col_email_nuova not in df_finale.columns:
-        if cols_map["email"] and cols_map["email"] in df_finale.columns:
-            pos_email = df_finale.columns.get_loc(cols_map["email"]) + 1
-            df_finale.insert(pos_email, col_email_nuova, "")
-        else:
-            df_finale[col_email_nuova] = ""
-
-    if cols_map["sito"] and cols_map["sito"] in df_finale.columns:
-        col_sito_nuovo = "Sito Web nuovo"
-        if col_sito_nuovo not in df_finale.columns:
-            pos_sito = df_finale.columns.get_loc(cols_map["sito"]) + 1
-            df_finale.insert(pos_sito, col_sito_nuovo, "")
-    else:
-        col_sito_nuovo = "Sito_Web"
-        if col_sito_nuovo not in df_finale.columns:
-            df_finale[col_sito_nuovo] = ""
-
-    col_piva = cols_map["piva"] or "P.IVA"
-    col_cf = cols_map["cf"] or "C.F."
-    for col_fisc in [col_piva, col_cf]:
-        if col_fisc not in df_finale.columns:
-            df_finale[col_fisc] = ""
-
-    colonne_extra = [
+    colonne_arricchimento_base = [
         "Esito_Verifica",
-        "Chiave_Ricerca_CF_PIVA",
         "Omonimia",
         "Trovato_Maps",
         "Nome_Maps",
@@ -1716,84 +1701,182 @@ def riallinea_puzzle_e_crea_excel(
         "PagineGialle_Bianche",
         "Albi_Portali_Directory",
     ]
-    for col_ex in colonne_extra:
-        if col_ex not in df_finale.columns:
-            df_finale[col_ex] = ""
 
-    colonne_scrivibili = [
-        col_tel_nuovo,
-        col_email_nuova,
-        col_sito_nuovo,
-        col_piva,
-        col_cf,
-    ] + colonne_extra
-    for col_w in colonne_scrivibili:
-        df_finale[col_w] = df_finale[col_w].astype(object)
+    # Evita collisioni di nome se il file originale aveva già colonne come "Indirizzo" o "CAP"
+    nomi_gia_usati_f2 = {"Denominazione", "P.IVA", "C.F."} | set(altre_colonne_originali)
+    mappa_col_arricchimento = []
+    if col_sito_orig:
+        nome_sito_extra = (
+            "Sito Web nuovo"
+            if "Sito Web nuovo" not in nomi_gia_usati_f2
+            else "Sito_Web_Trovato_PCF"
+        )
+        mappa_col_arricchimento.append(("Sito_Web_Nuovo_Extra", nome_sito_extra))
+        nomi_gia_usati_f2.add(nome_sito_extra)
 
-    celle_rosse_coordinate = set()
-    col_index_map = {col: idx + 1 for idx, col in enumerate(df_finale.columns)}
+    for col_ex in colonne_arricchimento_base:
+        nome_dest = col_ex if col_ex not in nomi_gia_usati_f2 else f"{col_ex}_PCF"
+        mappa_col_arricchimento.append((col_ex, nome_dest))
+        nomi_gia_usati_f2.add(nome_dest)
+
+    righe_f1 = []
+    righe_f2 = []
+
+    celle_rosse_f1 = set()  # (row_excel 1-based, col_excel 1-based)
+    celle_rosse_f2 = set()
+
+    col_idx_f1 = {c: i + 1 for i, c in enumerate(colonne_foglio1)}
+    colonne_foglio2 = (
+        ["Denominazione", "P.IVA", "C.F."]
+        + altre_colonne_originali
+        + [dest for _, dest in mappa_col_arricchimento]
+    )
+    col_idx_f2 = {c: i + 1 for i, c in enumerate(colonne_foglio2)}
 
     nuove_email_count = 0
     nuovi_tel_count = 0
     nuovi_siti_count = 0
 
-    for idx in range(len(df_finale)):
+    for idx in range(len(df_backup)):
         excel_row = idx + 2  # Riga 1 = intestazioni
-        res = risultati_primari_per_id.get(idx)
-        if not res:
-            continue
+        row_bkp = df_backup.iloc[idx]
+        res = risultati_primari_per_id.get(idx, {})
 
-        if valore_presente(res.get("Telefono_Trovato")):
-            df_finale.at[idx, col_tel_nuovo] = res["Telefono_Trovato"]
-            celle_rosse_coordinate.add((excel_row, col_index_map[col_tel_nuovo]))
-            nuovi_tel_count += 1
-
-        if valore_presente(res.get("Email_Trovata")):
-            df_finale.at[idx, col_email_nuova] = res["Email_Trovata"]
-            celle_rosse_coordinate.add((excel_row, col_index_map[col_email_nuova]))
-            nuove_email_count += 1
-
-        if valore_presente(res.get("Sito_Web_Trovato")):
-            df_finale.at[idx, col_sito_nuovo] = res["Sito_Web_Trovato"]
-            celle_rosse_coordinate.add((excel_row, col_index_map[col_sito_nuovo]))
-            nuovi_siti_count += 1
-
-        piva_orig_presente = (
-            valore_presente(df_backup.at[idx, cols_map["piva"]])
-            if cols_map["piva"]
-            else False
+        denom_val = (
+            str(row_bkp[col_az_orig]).strip()
+            if col_az_orig and valore_presente(row_bkp[col_az_orig])
+            else ""
         )
-        if not piva_orig_presente and valore_presente(res.get("P.IVA_Trovata")):
-            df_finale.at[idx, col_piva] = res["P.IVA_Trovata"]
-            celle_rosse_coordinate.add((excel_row, col_index_map[col_piva]))
 
-        cf_orig_presente = (
-            valore_presente(df_backup.at[idx, cols_map["cf"]])
-            if cols_map["cf"]
-            else False
+        # P.IVA (originale in nero, trovata ex novo in rosso)
+        piva_orig_ok = col_piva_orig and valore_presente(row_bkp[col_piva_orig])
+        if piva_orig_ok:
+            piva_val = str(row_bkp[col_piva_orig]).strip()
+        elif valore_presente(res.get("P.IVA_Trovata")):
+            piva_val = res["P.IVA_Trovata"]
+            celle_rosse_f1.add((excel_row, col_idx_f1["P.IVA"]))
+            celle_rosse_f2.add((excel_row, col_idx_f2["P.IVA"]))
+        else:
+            piva_val = ""
+
+        # C.F. (originale in nero, trovato ex novo in rosso)
+        cf_orig_ok = col_cf_orig and valore_presente(row_bkp[col_cf_orig])
+        if cf_orig_ok:
+            cf_val = str(row_bkp[col_cf_orig]).strip()
+        elif valore_presente(res.get("C.F._Trovato")):
+            cf_val = res["C.F._Trovato"]
+            celle_rosse_f1.add((excel_row, col_idx_f1["C.F."]))
+            celle_rosse_f2.add((excel_row, col_idx_f2["C.F."]))
+        else:
+            cf_val = ""
+
+        # EMAIL: se mancava -> in 'Email' (rosso); se già presente -> originale in 'Email' (nero) e trovata in 'Email nuova' (rosso)
+        email_orig_ok = col_email_orig and valore_presente(row_bkp[col_email_orig])
+        email_trovata = res.get("Email_Trovata", "")
+        if email_orig_ok:
+            email_val = str(row_bkp[col_email_orig]).strip()
+            if valore_presente(email_trovata):
+                email_nuova_val = email_trovata
+                celle_rosse_f1.add((excel_row, col_idx_f1["Email nuova"]))
+                nuove_email_count += 1
+            else:
+                email_nuova_val = ""
+        else:
+            email_nuova_val = ""
+            if valore_presente(email_trovata):
+                email_val = email_trovata
+                celle_rosse_f1.add((excel_row, col_idx_f1["Email"]))
+                nuove_email_count += 1
+            else:
+                email_val = ""
+
+        # TELEFONO: se mancava -> in 'Telefono' (rosso); se già presente -> originale in 'Telefono' (nero) e trovato in 'Telefono nuovo' (rosso)
+        tel_orig_ok = col_tel_orig and valore_presente(row_bkp[col_tel_orig])
+        tel_trovato = res.get("Telefono_Trovato", "")
+        if tel_orig_ok:
+            tel_val = str(row_bkp[col_tel_orig]).strip()
+            if valore_presente(tel_trovato):
+                tel_nuovo_val = tel_trovato
+                celle_rosse_f1.add((excel_row, col_idx_f1["Telefono nuovo"]))
+                nuovi_tel_count += 1
+            else:
+                tel_nuovo_val = ""
+        else:
+            tel_nuovo_val = ""
+            if valore_presente(tel_trovato):
+                tel_val = tel_trovato
+                celle_rosse_f1.add((excel_row, col_idx_f1["Telefono"]))
+                nuovi_tel_count += 1
+            else:
+                tel_val = ""
+
+        # SITO WEB: se mancava -> in 'Sito Web' (rosso); se già presente -> originale in nero e nuovo eventuale in Foglio 2 (rosso)
+        sito_orig_ok = col_sito_orig and valore_presente(row_bkp[col_sito_orig])
+        sito_trovato = res.get("Sito_Web_Trovato", "")
+        sito_extra_f2 = ""
+        if sito_orig_ok:
+            sito_val = str(row_bkp[col_sito_orig]).strip()
+            if valore_presente(sito_trovato):
+                sito_extra_f2 = sito_trovato
+                nuovi_siti_count += 1
+        else:
+            if valore_presente(sito_trovato):
+                sito_val = sito_trovato
+                celle_rosse_f1.add((excel_row, col_idx_f1["Sito Web"]))
+                nuovi_siti_count += 1
+            else:
+                sito_val = ""
+
+        righe_f1.append(
+            {
+                "Denominazione": denom_val,
+                "P.IVA": piva_val,
+                "C.F.": cf_val,
+                "Email": email_val,
+                "Email nuova": email_nuova_val,
+                "Telefono": tel_val,
+                "Telefono nuovo": tel_nuovo_val,
+                "Sito Web": sito_val,
+            }
         )
-        if not cf_orig_presente and valore_presente(res.get("C.F._Trovato")):
-            df_finale.at[idx, col_cf] = res["C.F._Trovato"]
-            celle_rosse_coordinate.add((excel_row, col_index_map[col_cf]))
 
-        for col_ex in colonne_extra:
-            if col_ex in res and valore_presente(res[col_ex]):
-                df_finale.at[idx, col_ex] = res[col_ex]
-                celle_rosse_coordinate.add((excel_row, col_index_map[col_ex]))
+        # Costruzione riga Foglio 2
+        riga_f2 = {
+            "Denominazione": denom_val,
+            "P.IVA": piva_val,
+            "C.F.": cf_val,
+        }
+        for col_alt in altre_colonne_originali:
+            val_alt = row_bkp[col_alt]
+            riga_f2[col_alt] = "" if not valore_presente(val_alt) else str(val_alt).strip()
+
+        for chiave_src, nome_dest in mappa_col_arricchimento:
+            if chiave_src == "Sito_Web_Nuovo_Extra":
+                val_dest = sito_extra_f2
+            else:
+                val_dest = res.get(chiave_src, "")
+            riga_f2[nome_dest] = val_dest
+            if valore_presente(val_dest):
+                celle_rosse_f2.add((excel_row, col_idx_f2[nome_dest]))
+
+        righe_f2.append(riga_f2)
+
+    df_foglio1 = pd.DataFrame(righe_f1, columns=colonne_foglio1)
+    df_foglio2 = pd.DataFrame(righe_f2, columns=colonne_foglio2)
 
     output_buffer = io.BytesIO()
     with pd.ExcelWriter(output_buffer, engine="openpyxl") as writer:
-        df_finale.to_excel(writer, sheet_name="Risultato_Finale", index=False)
+        df_foglio1.to_excel(writer, sheet_name="Contatti_Principali", index=False)
         formatta_foglio_excel(
-            writer.sheets["Risultato_Finale"],
-            celle_rosse=celle_rosse_coordinate,
+            writer.sheets["Contatti_Principali"],
+            celle_rosse=celle_rosse_f1,
         )
 
-        if df_dettaglio_completo is not None and not df_dettaglio_completo.empty:
-            df_dettaglio_completo.to_excel(
-                writer, sheet_name="Dettaglio_Omonimie", index=False
-            )
-            formatta_foglio_excel(writer.sheets["Dettaglio_Omonimie"])
+        df_foglio2.to_excel(writer, sheet_name="Altre_Colonne_e_Dettagli", index=False)
+        formatta_foglio_excel(
+            writer.sheets["Altre_Colonne_e_Dettagli"],
+            celle_rosse=celle_rosse_f2,
+        )
 
     output_buffer.seek(0)
     stats = {
@@ -1801,7 +1884,7 @@ def riallinea_puzzle_e_crea_excel(
         "nuovi_telefoni": nuovi_tel_count,
         "nuovi_siti": nuovi_siti_count,
     }
-    return df_finale, output_buffer.getvalue(), stats
+    return df_foglio1, df_foglio2, output_buffer.getvalue(), stats
 
 
 # ==========================================
@@ -1937,7 +2020,7 @@ if uploaded_file is not None:
 
     if not cols_map["azienda"]:
         st.error(
-            "Impossibile trovare la colonna delle aziende. Assicurati che si chiami 'Azienda' (o 'Ragione Sociale' / 'Denominazione')."
+            "Impossibile trovare la colonna delle aziende. Assicurati che si chiami 'Denominazione' o 'Azienda'."
         )
         st.stop()
 
@@ -1958,12 +2041,12 @@ if uploaded_file is not None:
     c3.metric("Contatti originali oscurati", "100% protetti")
 
     st.caption(
-        f"Colonne rilevate — Azienda: `{cols_map['azienda']}` | "
+        f"Colonne rilevate — Denominazione: `{cols_map['azienda']}` | "
         f"Località: `{cols_map['localita'] or 'Non presente'}` | "
         f"P.IVA: `{cols_map['piva'] or 'Non presente'}` | "
         f"C.F.: `{cols_map['cf'] or 'Non presente'}` | "
-        f"Email: `{cols_map['email'] or 'Non presente'}` → affiancherà `Email nuova` | "
-        f"Telefono: `{cols_map['telefono'] or 'Non presente'}` → affiancherà `Telefono nuovo` | "
+        f"Email: `{cols_map['email'] or 'Non presente'}` | "
+        f"Telefono: `{cols_map['telefono'] or 'Non presente'}` | "
         f"Sito Web: `{cols_map['sito'] or 'Non presente'}`"
     )
 
@@ -1989,7 +2072,6 @@ if uploaded_file is not None:
         col_localita = cols_map["localita"]
 
         risultati_primari_per_id = {}
-        righe_dettaglio_completo = []
 
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
@@ -2000,7 +2082,6 @@ if uploaded_file is not None:
 
         for idx_loop, (_, row) in enumerate(df_lavoro.iterrows()):
             id_riga = int(row["_id_riga_backup"])
-            chiave_fiscale = str(row["_chiave_fiscale"])
             piva_nota = str(row["_piva_input_norm"]).strip()
             cf_noto = str(row["_cf_input_norm"]).strip()
 
@@ -2169,7 +2250,6 @@ if uploaded_file is not None:
                 if not cf_finale and piva_finale:
                     cf_finale = piva_finale
 
-                # Unione finale dei soli contatti verificati (con ulteriore filtro anti-P.IVA)
                 email_trovata = unisci_valori(
                     email_sito, dati_maps.get("Email_Web", ""), lowercase=True, max_items=3
                 )
@@ -2193,7 +2273,6 @@ if uploaded_file is not None:
 
                 telefono_trovato = unisci_valori(*tel_candidati, lowercase=False, max_items=2)
 
-                # Etichetta esito verifica trasparente
                 if not motivo_verifica:
                     if dati_maps.get("Trovato_Maps") == "Sì" and telefono_trovato:
                         motivo_verifica = "Alta (Google Maps verificato)"
@@ -2206,9 +2285,6 @@ if uploaded_file is not None:
 
                 record_risultato = {
                     "Esito_Verifica": motivo_verifica,
-                    "Chiave_Ricerca_CF_PIVA": piva_finale or cf_finale or chiave_fiscale,
-                    "Azienda": azienda,
-                    "Localita_Input": localita,
                     "P.IVA_Trovata": piva_finale,
                     "C.F._Trovato": cf_finale,
                     "Email_Trovata": email_trovata,
@@ -2236,8 +2312,6 @@ if uploaded_file is not None:
                     "PagineGialle_Bianche": dati_maps.get("PagineGialle_Bianche", ""),
                     "Albi_Portali_Directory": dati_maps.get("Albi_Portali_Directory", ""),
                 }
-
-                righe_dettaglio_completo.append(record_risultato)
 
                 score_cand = 0
                 if match_fiscale_sito or "P.IVA/CF" in motivo_verifica:
@@ -2268,17 +2342,14 @@ if uploaded_file is not None:
         )
         eta_placeholder.empty()
 
-        df_dettaglio = pd.DataFrame(righe_dettaglio_completo)
-
-        df_finale, excel_bytes, stats = riallinea_puzzle_e_crea_excel(
+        df_foglio1, df_foglio2, excel_bytes, stats = riallinea_e_crea_excel_2_fogli(
             df_backup=df_backup,
             risultati_primari_per_id=risultati_primari_per_id,
-            df_dettaglio_completo=df_dettaglio,
             cols_map=cols_map,
         )
 
-        st.session_state.df_foglio1 = df_finale
-        st.session_state.df_foglio2 = df_dettaglio
+        st.session_state.df_foglio1 = df_foglio1
+        st.session_state.df_foglio2 = df_foglio2
         st.session_state.risultato_excel = excel_bytes
         st.session_state.nome_file_output = output_filename
         st.session_state.stats_risultato = stats
@@ -2293,9 +2364,9 @@ if st.session_state.risultato_excel is not None:
     if st.session_state.stats_risultato:
         s = st.session_state.stats_risultato
         m1, m2, m3 = st.columns(3)
-        m1.metric("Email nuove verificate (in rosso)", s["nuove_email"])
-        m2.metric("Telefoni nuovi verificati (in rosso)", s["nuovi_telefoni"])
-        m3.metric("Siti Web ufficiali verificati (in rosso)", s["nuovi_siti"])
+        m1.metric("Email trovate (in rosso)", s["nuove_email"])
+        m2.metric("Telefoni trovati (in rosso)", s["nuovi_telefoni"])
+        m3.metric("Siti Web ufficiali trovati (in rosso)", s["nuovi_siti"])
 
     st.download_button(
         label=f"Scarica {st.session_state.nome_file_output}",
@@ -2306,13 +2377,11 @@ if st.session_state.risultato_excel is not None:
     )
 
     tab1, tab2 = st.tabs(
-        ["Foglio 1 - Risultato Finale (Arricchito)", "Foglio 2 - Dettaglio e Omonimie"]
+        ["Foglio 1 - Contatti Principali", "Foglio 2 - Altre Colonne e Dettagli"]
     )
     with tab1:
         if st.session_state.df_foglio1 is not None:
             st.dataframe(st.session_state.df_foglio1, use_container_width=True)
     with tab2:
-        if st.session_state.df_foglio2 is not None and not st.session_state.df_foglio2.empty:
+        if st.session_state.df_foglio2 is not None:
             st.dataframe(st.session_state.df_foglio2, use_container_width=True)
-        else:
-            st.info("Nessun dettaglio aggiuntivo registrato.")

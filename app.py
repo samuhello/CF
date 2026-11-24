@@ -238,6 +238,12 @@ STOPWORDS_AZIENDA = {
     "accomandita", "semplice", "azioni", "responsabilita", "limitata",
 }
 
+PROFILI_SECRETS = {
+    "PCF1": ("MAPS_API_KEY_1", "GEMINI_API_KEY_1"),
+    "PCF2": ("MAPS_API_KEY_2", "GEMINI_API_KEY_2"),
+    "PCF3": ("MAPS_API_KEY_3", "GEMINI_API_KEY_3"),
+}
+
 
 # ==========================================
 # HEADER PERSONALIZZATO + TASTI GUIDA E TABELLA IDEALE
@@ -295,7 +301,7 @@ Se da Google Maps e dal sito manca ancora qualcosa di importante (email, telefon
 ### La tua privacy
 I tuoi contatti già salvati **non vengono mai letti** dai motori di ricerca o dai servizi esterni durante la ricerca: l'app li nasconde prima di partire e li rimette a posto solo alla fine, via codice.
 
-L'intelligenza artificiale non legge mai i contatti già presenti nel tuo file: viene usata solo per leggere i nomi delle aziende da PDF/immagini e, se attivata, per fare una ricerca su Google Search usando esclusivamente denominazione, P.IVA/C.F. e località. In più, le chiavi API che inserisci restano attive solo durante la tua sessione e non vengono salvate.
+L'intelligenza artificiale non legge mai i contatti già presenti nel tuo file: viene usata solo per leggere i nomi delle aziende da PDF/immagini e, se attivata, per fare una ricerca su Google Search usando esclusivamente denominazione, P.IVA/C.F. e località.
             """
         )
 
@@ -327,6 +333,17 @@ PCF si adatta in automatico: riconosce i nomi di colonna più comuni anche se sc
             st.info(
                 "Immagine di esempio (`tabella_efficiente.png`) non trovata nella cartella dell'app."
             )
+
+
+def carica_chiavi_profilo(nome_profilo):
+    """Legge la coppia di API Key (Maps + Gemini) dai Secrets di Streamlit Cloud."""
+    chiave_maps_nome, chiave_gemini_nome = PROFILI_SECRETS[nome_profilo]
+    try:
+        maps_k = str(st.secrets.get(chiave_maps_nome, "") or "").strip()
+        gemini_k = str(st.secrets.get(chiave_gemini_nome, "") or "").strip()
+    except Exception:
+        maps_k, gemini_k = "", ""
+    return maps_k, gemini_k
 
 
 # ==========================================
@@ -1589,7 +1606,6 @@ def estrai_dati_da_sito(
     if len(set(pive_trovate)) >= 4 and not match_fiscale:
         return False, "", "", "", [], [], False, False, {}
 
-    # Visita le sottopagine contatti/privacy controllando SIA l'URL SIA il testo visibile del link
     if (
         len(emails_trovate) == 0
         or len(telefoni_trovati) == 0
@@ -1620,7 +1636,6 @@ def estrai_dati_da_sito(
                 link_completo = urljoin(url_sito, a["href"])
                 if estrai_dominio(link_completo) == dominio_base and link_completo not in viste_pag:
                     viste_pag.add(link_completo)
-                    # Priorità ai link "contatti"
                     if "contatt" in href_low or "contatt" in testo_link or "contact" in href_low:
                         pagine_da_visitare.insert(0, link_completo)
                     else:
@@ -1704,7 +1719,6 @@ def estrai_dati_da_sito(
             match_fiscale = True
             motivo = "Alta (Sito verificato con P.IVA/CF)"
 
-    # Priorità a email ordinarie (non PEC) e sullo stesso dominio del sito
     emails_ordinate = sorted(
         emails_trovate,
         key=lambda e: (1 if is_email_pec(e) else 0, 0 if radice_dom and radice_dom in e.split("@")[-1] else 1, e),
@@ -1979,10 +1993,8 @@ def cerca_su_duckduckgo_web(
 # LIVELLO 4 (RECUPERO): GOOGLE SEARCH CON GEMINI (PARSING ROBUSTO + DIAGNOSTICA)
 # ==========================================
 def estrai_json_da_testo_llm(testo):
-    """Estrae in modo sicuro il primo oggetto JSON valido da una risposta testuale/markdown."""
     if not testo:
         return None
-    # 1. Prova prima dentro eventuali blocchi ```json ... ```
     for bloc in re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", testo, flags=re.DOTALL | re.IGNORECASE):
         try:
             obj = json.loads(bloc)
@@ -1991,7 +2003,6 @@ def estrai_json_da_testo_llm(testo):
         except Exception:
             pass
 
-    # 2. Usa raw_decode partendo da ogni '{' (non fallisce se ci sono testo/citazioni dopo)
     decoder = json.JSONDecoder()
     for idx, ch in enumerate(testo):
         if ch == "{":
@@ -2013,12 +2024,6 @@ def cerca_con_gemini_google_search(
     sito_noto="",
     gemini_api_key="",
 ):
-    """
-    Motore ufficiale di Google Search Grounding tramite Gemini 2.5 Flash.
-    Riceve SOLO Denominazione, P.IVA/C.F., località ed eventuale sito trovato da Maps
-    (MAI i contatti presenti nel file caricato dall'utente).
-    Restituisce: (risultato_dict, errore_api, stato_diagnostico)
-    """
     vuoto = {
         "email": "",
         "pec": "",
@@ -2029,7 +2034,7 @@ def cerca_con_gemini_google_search(
         "cap": "",
     }
     if not gemini_api_key:
-        return vuoto, "", "Non attivo (manca Gemini API Key)"
+        return vuoto, "", "Non attivo (manca Gemini API Key nei Secrets)"
 
     nome_breve = estrai_nome_commerciale(nome_azienda)
     riga_sito = (
@@ -2072,7 +2077,6 @@ def cerca_con_gemini_google_search(
 
         dati = estrai_json_da_testo_llm(testo_resp)
 
-        # Fallback: se Gemini ha risposto in testo/elenco invece che in JSON, estrai comunque i campi!
         if dati is None:
             emails_txt, tels_txt = estrai_contatti_da_testo_sicuri(
                 testo_resp, piva_nota=piva_nota, cf_noto=cf_noto
@@ -2105,7 +2109,6 @@ def cerca_con_gemini_google_search(
         if piva_nota and piva_g and piva_g != piva_nota:
             return vuoto, "", "Scartato (P.IVA diversa trovata su Google)"
 
-        # Raccoglie email ordinarie e PEC separandole in modo pulito
         email_raw = str(dati.get("email", "") or "").strip()
         pec_raw = str(dati.get("pec", "") or "").strip()
 
@@ -2543,8 +2546,8 @@ def riallinea_e_crea_excel_2_fogli(
 # ==========================================
 render_header()
 
-if "api_confermata" not in st.session_state:
-    st.session_state.api_confermata = False
+if "profilo_attivo" not in st.session_state:
+    st.session_state.profilo_attivo = ""
 if "places_api_key" not in st.session_state:
     st.session_state.places_api_key = ""
 if "gemini_api_key" not in st.session_state:
@@ -2561,60 +2564,45 @@ if "stats_risultato" not in st.session_state:
     st.session_state.stats_risultato = None
 
 # ------------------------------------------
-# STEP 1: RICHIESTA API KEY ALL'APERTURA
+# STEP 1: SELEZIONE PROFILO (PCF1 / PCF2 / PCF3) DA SECRETS
 # ------------------------------------------
-if not st.session_state.api_confermata:
-    st.subheader("Configurazione API Key")
-    st.write(
-        "Inserisci la tua API Key per iniziare. La chiave viene mantenuta solo "
-        "per la sessione corrente e non viene salvata."
-    )
+st.subheader("Seleziona profilo di lavoro")
+col_p1, col_p2, col_p3 = st.columns(3)
 
-    with st.form("form_api_key"):
-        places_key = st.text_input(
-            "Google API Key (Places API per Maps)",
-            type="password",
-            placeholder="AIza...",
-        )
-        usa_stessa_key = st.checkbox(
-            "Usa la stessa API Key anche per Gemini (PDF/immagini e recupero Google Search)",
-            value=True,
-        )
-        gemini_key = ""
-        if not usa_stessa_key:
-            gemini_key = st.text_input(
-                "Gemini API Key (da Google AI Studio, per PDF/immagini e recupero Google Search)",
-                type="password",
-                placeholder="AIza...",
-            )
-
-        conferma = st.form_submit_button("Procedi", type="primary")
-        if conferma:
-            if not places_key.strip():
-                st.error("Inserisci una API Key valida per procedere.")
-            else:
-                st.session_state.places_api_key = places_key.strip()
-                st.session_state.gemini_api_key = (
-                    places_key.strip() if usa_stessa_key else gemini_key.strip()
+for col_ui, nome_prof in zip([col_p1, col_p2, col_p3], ["PCF1", "PCF2", "PCF3"]):
+    attivo = st.session_state.profilo_attivo == nome_prof
+    with col_ui:
+        if st.button(
+            f"{nome_prof} (Attivo)" if attivo else nome_prof,
+            type="primary" if attivo else "secondary",
+            use_container_width=True,
+        ):
+            maps_k, gemini_k = carica_chiavi_profilo(nome_prof)
+            if not maps_k:
+                st.error(
+                    f"Chiave `{PROFILI_SECRETS[nome_prof][0]}` mancante nei Secrets di Streamlit Cloud."
                 )
-                st.session_state.api_confermata = True
+            else:
+                st.session_state.profilo_attivo = nome_prof
+                st.session_state.places_api_key = maps_k
+                st.session_state.gemini_api_key = gemini_k
+                st.session_state.risultato_excel = None
+                st.session_state.df_foglio1 = None
+                st.session_state.df_foglio2 = None
+                st.session_state.stats_risultato = None
                 st.rerun()
 
+if not st.session_state.profilo_attivo:
+    st.info(
+        "Scegli **PCF1**, **PCF2** o **PCF3** per attivare l'account desiderato in questa finestra."
+    )
     st.stop()
 
-col_info, col_reset = st.columns([5, 1])
-with col_info:
-    st.success("API Key attiva per questa sessione.")
-with col_reset:
-    if st.button("Cambia API Key"):
-        st.session_state.api_confermata = False
-        st.session_state.places_api_key = ""
-        st.session_state.gemini_api_key = ""
-        st.session_state.risultato_excel = None
-        st.session_state.df_foglio1 = None
-        st.session_state.df_foglio2 = None
-        st.session_state.stats_risultato = None
-        st.rerun()
+stato_gemini = "attiva" if st.session_state.gemini_api_key else "non configurata"
+st.success(
+    f"Profilo attivo in questa scheda: **{st.session_state.profilo_attivo}** "
+    f"(Google Maps API attiva | Gemini API {stato_gemini})"
+)
 
 # ------------------------------------------
 # STEP 2: CARICAMENTO FILE, BACKUP E OSCURAMENTO MECCANICO
@@ -2638,13 +2626,14 @@ if uploaded_file is not None:
             df_input = leggi_file_tabellare(uploaded_file.getvalue(), ext)
         elif ext in [".png", ".jpg", ".jpeg", ".pdf"]:
             if not st.session_state.gemini_api_key:
+                chiave_gem_mancante = PROFILI_SECRETS[st.session_state.profilo_attivo][1]
                 st.error(
-                    "Per leggere file immagine o PDF è necessaria una "
-                    "Gemini API Key. Clicca su 'Cambia API Key' per inserirla."
+                    f"Per leggere file immagine o PDF è necessario configurare `{chiave_gem_mancante}` "
+                    f"nei Secrets di Streamlit Cloud per {st.session_state.profilo_attivo}."
                 )
                 st.stop()
 
-            cache_key = f"doc_df_{file_name}_{uploaded_file.size}"
+            cache_key = f"doc_df_{st.session_state.profilo_attivo}_{file_name}_{uploaded_file.size}"
             if cache_key not in st.session_state:
                 with st.spinner("Estrazione nominativi dal file con Gemini..."):
                     mime_map = {
@@ -2763,7 +2752,7 @@ if uploaded_file is not None:
 
             info_fiscale = f" (CF/P.IVA: {piva_nota or cf_noto})" if (piva_nota or cf_noto) else ""
             status_placeholder.info(
-                f"Elaborazione [{idx_loop + 1}/{totale_da_elaborare}]: "
+                f"[{st.session_state.profilo_attivo}] Elaborazione [{idx_loop + 1}/{totale_da_elaborare}]: "
                 f"**{azienda}**{info_fiscale}"
             )
             eta_placeholder.caption(
@@ -2925,7 +2914,7 @@ if uploaded_file is not None:
                     if not dati_maps.get(sk) and socials_trovati.get(sk):
                         dati_maps[sk] = socials_trovati[sk]
 
-                # LIVELLO 4 (RECUPERO): Google Search tramite Gemini (equivalente ufficiale AI Overview)
+                # LIVELLO 4 (RECUPERO): Google Search tramite Gemini
                 email_gemini = ""
                 tel_gemini = ""
                 pec_trovata = ""
@@ -2939,7 +2928,7 @@ if uploaded_file is not None:
                     if not usa_gemini_search or not st.session_state.gemini_api_key:
                         stato_google_search = "Disattivato"
                     elif gemini_disabilitato_errore:
-                        stato_google_search = "Disabilitato (chiave API senza Gemini attivo)"
+                        stato_google_search = "Disabilitato (errore chiave Gemini)"
                     else:
                         res_g, err_g, stato_google_search = cerca_con_gemini_google_search(
                             nome_azienda=azienda,
@@ -2954,10 +2943,10 @@ if uploaded_file is not None:
                             err_low = err_g.lower()
                             if not gemini_avviso_mostrato:
                                 gemini_avviso_mostrato = True
+                                chiave_gem_nome = PROFILI_SECRETS[st.session_state.profilo_attivo][1]
                                 st.warning(
-                                    f"Google Search (Gemini) ha restituito un errore: `{err_g[:220]}`. "
-                                    "Se stai usando una chiave solo per Google Maps, clicca su 'Cambia API Key', "
-                                    "togli la spunta e inserisci una Gemini API Key da Google AI Studio."
+                                    f"Google Search (Gemini) per {st.session_state.profilo_attivo} ha restituito un errore: "
+                                    f"`{err_g[:220]}`. Controlla la chiave `{chiave_gem_nome}` nei Secrets di Streamlit Cloud."
                                 )
                             if any(
                                 k in err_low
@@ -3133,7 +3122,7 @@ if uploaded_file is not None:
 
         tempo_totale = time.time() - tempo_inizio
         status_placeholder.success(
-            f"Ricerca verificata completata su {totale_da_elaborare} imprese in **{formatta_tempo(tempo_totale)}**!"
+            f"[{st.session_state.profilo_attivo}] Ricerca verificata completata su {totale_da_elaborare} imprese in **{formatta_tempo(tempo_totale)}**!"
         )
         eta_placeholder.empty()
 

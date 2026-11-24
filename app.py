@@ -3,11 +3,15 @@ import json
 import math
 import os
 import re
+import threading
 import time
+import unicodedata
 import urllib.parse
+import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import Counter
+from datetime import datetime, timezone
 from urllib.parse import urljoin
 
 import pandas as pd
@@ -244,6 +248,203 @@ PROFILI_SECRETS = {
     "PCF3": ("MAPS_API_KEY_3", "GEMINI_API_KEY_3"),
 }
 
+SUPABASE_BUCKET = "pcf-storico"
+SUPABASE_TABLE = "storico_ricerche"
+CHECKPOINT_OGNI_N_RIGHE = 15
+
+
+# ==========================================
+# GESTORE SUPABASE (STORICO PERMANENTE VIA REST API, ZERO LIBRERIE EXTRA)
+# ==========================================
+def leggi_credenziali_supabase():
+    try:
+        url = str(st.secrets.get("SUPABASE_URL", "") or "").strip().rstrip("/")
+        key = str(st.secrets.get("SUPABASE_SECRET_KEY", "") or "").strip()
+    except Exception:
+        url, key = "", ""
+    return url, key
+
+
+def _supabase_headers(key, extra=None):
+    """
+    Prepara gli header corretti sia per le nuove chiavi sb_secret_...
+    (solo header `apikey` + User-Agent server non-browser) sia per le chiavi JWT legacy.
+    """
+    h = {
+        "apikey": key,
+        "User-Agent": "PCF-Streamlit-Server/1.0",
+    }
+    if key.startswith("eyJ"):
+        h["Authorization"] = f"Bearer {key}"
+    if extra:
+        h.update(extra)
+    return h
+
+
+def sanitizza_percorso_storage(nome_file):
+    """Converte il nome file in un percorso ASCII sicuro per Supabase Storage."""
+    norm = unicodedata.normalize("NFKD", str(nome_file)).encode("ascii", "ignore").decode("ascii")
+    norm = re.sub(r"[^A-Za-z0-9._-]+", "_", norm).strip("._")
+    return norm or "file_elaborato.xlsx"
+
+
+def supabase_upsert_record(record_dict, supa_url="", supa_key=""):
+    if not supa_url or not supa_key:
+        return False, "Supabase non configurato"
+    try:
+        resp = requests.post(
+            f"{supa_url}/rest/v1/{SUPABASE_TABLE}",
+            headers=_supabase_headers(
+                supa_key,
+                {
+                    "Content-Type": "application/json",
+                    "Prefer": "resolution=merge-duplicates,return=minimal",
+                },
+            ),
+            json=record_dict,
+            timeout=15,
+        )
+        if resp.status_code in (200, 201, 204):
+            return True, ""
+        return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def supabase_upload_excel(storage_path, excel_bytes, supa_url="", supa_key=""):
+    if not supa_url or not supa_key or not excel_bytes:
+        return False, "Supabase non configurato o file vuoto"
+    try:
+        encoded = urllib.parse.quote(storage_path, safe="/")
+        resp = requests.post(
+            f"{supa_url}/storage/v1/object/{SUPABASE_BUCKET}/{encoded}",
+            headers=_supabase_headers(
+                supa_key,
+                {
+                    "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "x-upsert": "true",
+                },
+            ),
+            data=excel_bytes,
+            timeout=45,
+        )
+        if resp.status_code in (200, 201):
+            return True, ""
+        return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def supabase_download_excel(storage_path, supa_url="", supa_key=""):
+    if not supa_url or not supa_key or not storage_path:
+        return None, "Percorso mancante o Supabase non configurato"
+    try:
+        encoded = urllib.parse.quote(storage_path, safe="/")
+        resp = requests.get(
+            f"{supa_url}/storage/v1/object/{SUPABASE_BUCKET}/{encoded}",
+            headers=_supabase_headers(supa_key),
+            timeout=45,
+        )
+        if resp.status_code == 200:
+            return resp.content, ""
+        return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        return None, str(exc)
+
+
+def supabase_lista_storico(supa_url="", supa_key="", limit=50):
+    if not supa_url or not supa_key:
+        return [], "Supabase non configurato nei Secrets"
+    try:
+        resp = requests.get(
+            f"{supa_url}/rest/v1/{SUPABASE_TABLE}?select=*&order=created_at.desc&limit={int(limit)}",
+            headers=_supabase_headers(supa_key),
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return (data if isinstance(data, list) else []), ""
+        return [], f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        return [], str(exc)
+
+
+def supabase_elimina_ricerca(job_id, storage_path="", supa_url="", supa_key=""):
+    if not supa_url or not supa_key:
+        return False, "Supabase non configurato"
+    try:
+        if storage_path:
+            requests.delete(
+                f"{supa_url}/storage/v1/object/{SUPABASE_BUCKET}",
+                headers=_supabase_headers(supa_key, {"Content-Type": "application/json"}),
+                json={"prefixes": [storage_path]},
+                timeout=20,
+            )
+        resp = requests.delete(
+            f"{supa_url}/rest/v1/{SUPABASE_TABLE}?id=eq.{urllib.parse.quote(str(job_id))}",
+            headers=_supabase_headers(supa_key),
+            timeout=15,
+        )
+        if resp.status_code in (200, 204):
+            return True, ""
+        return False, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+# ==========================================
+# GESTORE PROCESSI IN BACKGROUND (CONDIVISO SUL SERVER)
+# ==========================================
+@st.cache_resource
+def get_job_store():
+    """
+    Memoria condivisa sul server Streamlit: sopravvive alla chiusura accidentale
+    della scheda browser e permette di seguire PCF1, PCF2 e PCF3 in parallelo.
+    """
+    return {
+        "lock": threading.Lock(),
+        "profili": {},  # profilo -> dict stato job corrente/ultimo
+        "storico_locale": [],  # fallback in memoria se Supabase non è configurato
+    }
+
+
+def leggi_job_profilo(profilo):
+    store = get_job_store()
+    with store["lock"]:
+        job = store["profili"].get(profilo)
+        return dict(job) if job else None
+
+
+def profilo_in_esecuzione(profilo):
+    job = leggi_job_profilo(profilo)
+    return bool(job and job.get("stato") == "In corso")
+
+
+def richiedi_stop_profilo(profilo):
+    store = get_job_store()
+    with store["lock"]:
+        job = store["profili"].get(profilo)
+        if job and job.get("stop_event") is not None:
+            job["stop_event"].set()
+            job["messaggio_stato"] = "Arresto in corso: salvataggio delle righe già completate..."
+
+
+def formatta_data_italiana(iso_str):
+    if not iso_str:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(str(iso_str).replace("Z", "+00:00"))
+        return dt.astimezone().strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(iso_str)[:16]
+
+
+def rerun_sicuro():
+    try:
+        st.rerun(scope="app")
+    except TypeError:
+        st.rerun()
+
 
 # ==========================================
 # HEADER PERSONALIZZATO + TASTI GUIDA E TABELLA IDEALE
@@ -290,6 +491,9 @@ Quando finisce, ti prepara un nuovo file Excel diviso in **due fogli**:
 Tutto quello che avevi già resta al suo posto in **nero**, mentre quello che trova PCF viene scritto in **rosso**:
 - Se per un'azienda **non avevi** ancora email o telefono, il dato trovato viene messo direttamente nella colonna `Email` o `Telefono` (in rosso).
 - Se invece email o telefono **c'erano già**, quelli vecchi restano lì e i nuovi vengono messi accanto, in `Email nuova` o `Telefono nuovo` (sempre in rosso).
+
+### Ricerca in background e Storico permanente
+Le ricerche girano in **background** separatamente per **PCF1**, **PCF2** e **PCF3**: anche se chiudi la scheda per sbaglio, l'elaborazione continua sul server e salva automaticamente i risultati nello **Storico ricerche** su Supabase, da cui potrai rivederli e riscaricarli in qualsiasi momento.
 
 ### Cosa trova e quando lo trova
 L'app cerca di darti solo contatti affidabili: se non è sicura di un dato, preferisce lasciarlo vuoto piuttosto che inventarlo o mischiarlo.
@@ -464,7 +668,6 @@ def valore_presente(val):
 
 
 def pulisci_nome_azienda(nome):
-    """Rimuove tutte le forme giuridiche italiane (sigle ed estese)."""
     pulito = re.sub(
         r"\b("
         r"s\.?r\.?l\.?s?|s\.?p\.?a\.?|s\.?n\.?c\.?|s\.?a\.?s\.?|s\.?c\.?a\.?r\.?l\.?|"
@@ -484,10 +687,6 @@ def pulisci_nome_azienda(nome):
 
 
 def estrai_nome_commerciale(nome):
-    """
-    Estrae il nome commerciale breve da ragioni sociali lunghe di SNC/SAS/farmacie/agenzie.
-    Esempio: 'FARMACIA DEI VELIERI DEI DOTTORI MUSCOLO... SOCIETA IN NOME COLLETTIVO' -> 'FARMACIA DEI VELIERI'
-    """
     base = pulisci_nome_azienda(nome)
     patterns_taglio = [
         r"\s+(?:dei\s+dott(?:or[ie]|\.?)|del\s+dott(?:\.|ore)?|della\s+dott(?:\.|ssa|oressa)?)\b.*$",
@@ -1252,7 +1451,7 @@ def cerca_su_ufficio_camerale(
 
 
 # ==========================================
-# LIVELLO 1: GOOGLE PLACES API (MAPS) + RECENSIONI
+# LIVELLO 1: GOOGLE PLACES API (MAPS) — THREAD-SAFE
 # ==========================================
 def cerca_su_google_places(
     nome_azienda,
@@ -1261,6 +1460,7 @@ def cerca_su_google_places(
     cap_hint="",
     persona_senza_sede=False,
 ):
+    """Restituisce (lista_risultati, eventuale_messaggio_errore) — 100% thread-safe."""
     url = "https://places.googleapis.com/v1/places:searchText"
     headers = {
         "Content-Type": "application/json",
@@ -1305,15 +1505,15 @@ def cerca_su_google_places(
         data = response.json()
 
         if "error" in data:
-            st.warning(
+            err_msg = (
                 f"Errore Google Places API per '{nome_azienda}': "
                 f"{data['error'].get('message', '')}"
             )
-            return risultato_vuoto
+            return risultato_vuoto, err_msg
 
         places = data.get("places", [])
         if not places:
-            return risultato_vuoto
+            return risultato_vuoto, ""
 
         candidati = [
             p
@@ -1323,7 +1523,7 @@ def cerca_su_google_places(
             )
         ]
         if not candidati:
-            return risultato_vuoto
+            return risultato_vuoto, ""
 
         risultati = []
         indirizzi_visti = set()
@@ -1380,13 +1580,13 @@ def cerca_su_google_places(
             )
 
         if not risultati:
-            return risultato_vuoto
+            return risultato_vuoto, ""
 
         if persona_senza_sede and len(token_significativi_azienda(nome_query)) <= 2:
             if len(risultati) > 1:
                 risultati_con_sito = [r for r in risultati if r.get("Sito_Web")]
                 if not risultati_con_sito:
-                    return risultato_vuoto
+                    return risultato_vuoto, ""
                 risultati = risultati_con_sito
 
         def priorita_geo(r):
@@ -1400,13 +1600,13 @@ def cerca_su_google_places(
         if len(risultati) > 1:
             risultati.sort(key=priorita_geo)
 
-        return risultati
+        return risultati, ""
     except Exception:
-        return risultato_vuoto
+        return risultato_vuoto, ""
 
 
 # ==========================================
-# FALLBACK MIRATO SUL DOMINIO UFFICIALE (BYPASSA WAF / JS / TIMEOUT)
+# FALLBACK MIRATO SUL DOMINIO UFFICIALE
 # ==========================================
 def cerca_contatti_su_dominio_ddg(dominio, piva_nota="", cf_noto=""):
     if not dominio:
@@ -1521,7 +1721,6 @@ def estrai_dati_da_sito(
             if soup.title and soup.title.string:
                 titoli_pagine.append(soup.title.string.strip().lower())
 
-            # 1. JSON-LD (Schema.org) prima di rimuovere <script>
             em_ld, tel_ld, pive_ld, soc_ld = estrai_da_jsonld(
                 soup, piva_nota=piva_nota, cf_noto=cf_noto
             )
@@ -1534,7 +1733,6 @@ def estrai_dati_da_sito(
                 if sk not in socials_sito:
                     socials_sito[sk] = sv
 
-            # 2. Email protette Cloudflare (data-cfemail)
             for cf_el in soup.find_all(attrs={"data-cfemail": True}):
                 dec = decodifica_cfemail(cf_el.get("data-cfemail", ""))
                 if "@" in dec:
@@ -1543,7 +1741,6 @@ def estrai_dati_da_sito(
             for tag in soup.find_all(["script", "style", "noscript"]):
                 tag.decompose()
 
-            # 3. Link mailto:, tel: e social
             for a in soup.find_all("a", href=True):
                 href = a["href"].strip()
                 href_low = href.lower()
@@ -1990,7 +2187,7 @@ def cerca_su_duckduckgo_web(
 
 
 # ==========================================
-# LIVELLO 4 (RECUPERO): GOOGLE SEARCH CON GEMINI (PARSING ROBUSTO + DIAGNOSTICA)
+# LIVELLO 4 (RECUPERO): GOOGLE SEARCH CON GEMINI
 # ==========================================
 def estrai_json_da_testo_llm(testo):
     if not testo:
@@ -2224,11 +2421,12 @@ def cerca_piva_cf_fallback(
 # CONTROLLO ANTI-DUPLICATO + RIALLINEAMENTO IN 2 FOGLI + ROSSO
 # ==========================================
 def pulisci_duplicati_trasversali(risultati_primari_per_id, df_backup, cols_map):
+    risultati_copia = {k: dict(v) for k, v in risultati_primari_per_id.items()}
     col_cf_orig = cols_map["cf"]
     col_piva_orig = cols_map["piva"]
 
     piva_to_cfs = {}
-    for idx, res in risultati_primari_per_id.items():
+    for idx, res in risultati_copia.items():
         piva_orig_ok = col_piva_orig and valore_presente(df_backup.iloc[idx][col_piva_orig])
         if piva_orig_ok:
             continue
@@ -2244,7 +2442,7 @@ def pulisci_duplicati_trasversali(risultati_primari_per_id, df_backup, cols_map)
 
     pive_sospette = {p for p, cfs in piva_to_cfs.items() if len(cfs) > 1}
     if pive_sospette:
-        for idx, res in risultati_primari_per_id.items():
+        for idx, res in risultati_copia.items():
             if res.get("P.IVA_Trovata") in pive_sospette:
                 cf_orig = (
                     normalizza_cf_input(df_backup.iloc[idx][col_cf_orig])
@@ -2255,7 +2453,7 @@ def pulisci_duplicati_trasversali(risultati_primari_per_id, df_backup, cols_map)
                     res["P.IVA_Trovata"] = ""
 
     conteggio_email = Counter()
-    for idx, res in risultati_primari_per_id.items():
+    for idx, res in risultati_copia.items():
         em = res.get("Email_Trovata", "")
         if not valore_presente(em):
             continue
@@ -2264,7 +2462,7 @@ def pulisci_duplicati_trasversali(risultati_primari_per_id, df_backup, cols_map)
 
     email_duplicate = {e for e, cnt in conteggio_email.items() if cnt > 1}
     if email_duplicate:
-        for idx, res in risultati_primari_per_id.items():
+        for idx, res in risultati_copia.items():
             em = res.get("Email_Trovata", "")
             if not valore_presente(em):
                 continue
@@ -2284,7 +2482,7 @@ def pulisci_duplicati_trasversali(risultati_primari_per_id, df_backup, cols_map)
                     tenute.append(singola)
             res["Email_Trovata"] = ", ".join(tenute)
 
-    return risultati_primari_per_id
+    return risultati_copia
 
 
 def riallinea_e_crea_excel_2_fogli(
@@ -2292,7 +2490,7 @@ def riallinea_e_crea_excel_2_fogli(
     risultati_primari_per_id,
     cols_map,
 ):
-    risultati_primari_per_id = pulisci_duplicati_trasversali(
+    risultati_puliti = pulisci_duplicati_trasversali(
         risultati_primari_per_id, df_backup, cols_map
     )
 
@@ -2391,7 +2589,7 @@ def riallinea_e_crea_excel_2_fogli(
     for idx in range(len(df_backup)):
         excel_row = idx + 2
         row_bkp = df_backup.iloc[idx]
-        res = risultati_primari_per_id.get(idx, {})
+        res = risultati_puliti.get(idx, {})
 
         denom_val = (
             str(row_bkp[col_az_orig]).strip()
@@ -2542,196 +2740,84 @@ def riallinea_e_crea_excel_2_fogli(
 
 
 # ==========================================
-# INTERFACCIA UTENTE PRINCIPALE
+# WORKER IN BACKGROUND (SOPRAVVIVE ALLA CHIUSURA DELLA SCHEDA)
 # ==========================================
-render_header()
+def esegui_ricerca_background(
+    store,
+    job_id,
+    profilo,
+    file_originale,
+    output_filename,
+    storage_path,
+    df_backup,
+    df_lavoro,
+    cols_map,
+    places_api_key,
+    gemini_api_key,
+    usa_gemini_search,
+    supa_url,
+    supa_key,
+    stop_event,
+):
+    col_azienda = cols_map["azienda"]
+    col_localita = cols_map["localita"]
+    totale_da_elaborare = len(df_lavoro)
+    risultati_primari_per_id = {}
 
-if "profilo_attivo" not in st.session_state:
-    st.session_state.profilo_attivo = ""
-if "places_api_key" not in st.session_state:
-    st.session_state.places_api_key = ""
-if "gemini_api_key" not in st.session_state:
-    st.session_state.gemini_api_key = ""
-if "risultato_excel" not in st.session_state:
-    st.session_state.risultato_excel = None
-if "nome_file_output" not in st.session_state:
-    st.session_state.nome_file_output = ""
-if "df_foglio1" not in st.session_state:
-    st.session_state.df_foglio1 = None
-if "df_foglio2" not in st.session_state:
-    st.session_state.df_foglio2 = None
-if "stats_risultato" not in st.session_state:
-    st.session_state.stats_risultato = None
+    gemini_avviso_mostrato = False
+    gemini_disabilitato_errore = False
+    tempo_inizio = time.time()
+    stima_iniziale_per_riga = 5.5
+    created_at_iso = datetime.now(timezone.utc).isoformat()
 
-# ------------------------------------------
-# STEP 1: SELEZIONE PROFILO (PCF1 / PCF2 / PCF3) DA SECRETS
-# ------------------------------------------
-st.subheader("Seleziona profilo di lavoro")
-col_p1, col_p2, col_p3 = st.columns(3)
+    def aggiorna_job_memoria(**campi):
+        with store["lock"]:
+            if profilo in store["profili"] and store["profili"][profilo].get("job_id") == job_id:
+                store["profili"][profilo].update(campi)
 
-for col_ui, nome_prof in zip([col_p1, col_p2, col_p3], ["PCF1", "PCF2", "PCF3"]):
-    attivo = st.session_state.profilo_attivo == nome_prof
-    with col_ui:
-        if st.button(
-            f"{nome_prof} (Attivo)" if attivo else nome_prof,
-            type="primary" if attivo else "secondary",
-            use_container_width=True,
-        ):
-            maps_k, gemini_k = carica_chiavi_profilo(nome_prof)
-            if not maps_k:
-                st.error(
-                    f"Chiave `{PROFILI_SECRETS[nome_prof][0]}` mancante nei Secrets di Streamlit Cloud."
-                )
-            else:
-                st.session_state.profilo_attivo = nome_prof
-                st.session_state.places_api_key = maps_k
-                st.session_state.gemini_api_key = gemini_k
-                st.session_state.risultato_excel = None
-                st.session_state.df_foglio1 = None
-                st.session_state.df_foglio2 = None
-                st.session_state.stats_risultato = None
-                st.rerun()
+    def aggiungi_warning(msg):
+        with store["lock"]:
+            if profilo in store["profili"] and store["profili"][profilo].get("job_id") == job_id:
+                warns = list(store["profili"][profilo].get("warnings", []))
+                if msg not in warns and len(warns) < 10:
+                    warns.append(msg)
+                    store["profili"][profilo]["warnings"] = warns
 
-if not st.session_state.profilo_attivo:
-    st.info(
-        "Scegli **PCF1**, **PCF2** o **PCF3** per attivare l'account desiderato in questa finestra."
-    )
-    st.stop()
-
-stato_gemini = "attiva" if st.session_state.gemini_api_key else "non configurata"
-st.success(
-    f"Profilo attivo in questa scheda: **{st.session_state.profilo_attivo}** "
-    f"(Google Maps API attiva | Gemini API {stato_gemini})"
-)
-
-# ------------------------------------------
-# STEP 2: CARICAMENTO FILE, BACKUP E OSCURAMENTO MECCANICO
-# ------------------------------------------
-uploaded_file = st.file_uploader(
-    "Carica file",
-    type=["png", "jpg", "jpeg", "pdf", "csv", "xlsx", "xls", "ods"],
-    help="Formati supportati: PNG, JPG, JPEG, PDF, CSV, XLSX, XLS, ODS",
-)
-
-if uploaded_file is not None:
-    file_name = uploaded_file.name
-    base_name, ext = os.path.splitext(file_name)
-    ext = ext.lower()
-    output_filename = f"{base_name}_elaborato.xlsx"
-
-    df_input = None
+    def salva_su_supabase_record(stato_val, righe_elab, stats_dict=None, path_val="", err_val=""):
+        stats_dict = stats_dict or {}
+        rec = {
+            "id": job_id,
+            "created_at": created_at_iso,
+            "profilo": profilo,
+            "file_originale": file_originale,
+            "file_output": output_filename,
+            "stato": stato_val,
+            "totale_righe": int(totale_da_elaborare),
+            "righe_elaborate": int(righe_elab),
+            "nuove_email": int(stats_dict.get("nuove_email", 0)),
+            "nuovi_telefoni": int(stats_dict.get("nuovi_telefoni", 0)),
+            "nuovi_siti": int(stats_dict.get("nuovi_siti", 0)),
+            "recensioni_google": int(stats_dict.get("recensioni_google", 0)),
+            "storage_path": path_val,
+            "errore": str(err_val or "")[:500],
+        }
+        ok, err_s = supabase_upsert_record(rec, supa_url, supa_key)
+        if not ok and supa_url and supa_key:
+            aggiungi_warning(f"Errore salvataggio storico Supabase: {err_s}")
+        return rec
 
     try:
-        if ext in [".xlsx", ".xls", ".ods", ".csv"]:
-            df_input = leggi_file_tabellare(uploaded_file.getvalue(), ext)
-        elif ext in [".png", ".jpg", ".jpeg", ".pdf"]:
-            if not st.session_state.gemini_api_key:
-                chiave_gem_mancante = PROFILI_SECRETS[st.session_state.profilo_attivo][1]
-                st.error(
-                    f"Per leggere file immagine o PDF è necessario configurare `{chiave_gem_mancante}` "
-                    f"nei Secrets di Streamlit Cloud per {st.session_state.profilo_attivo}."
-                )
-                st.stop()
+        # Registra subito l'inizio su Supabase
+        salva_su_supabase_record("In corso", 0, {}, "", "")
 
-            cache_key = f"doc_df_{st.session_state.profilo_attivo}_{file_name}_{uploaded_file.size}"
-            if cache_key not in st.session_state:
-                with st.spinner("Estrazione nominativi dal file con Gemini..."):
-                    mime_map = {
-                        ".png": "image/png",
-                        ".jpg": "image/jpeg",
-                        ".jpeg": "image/jpeg",
-                        ".pdf": "application/pdf",
-                    }
-                    st.session_state[cache_key] = estrai_aziende_da_documento(
-                        uploaded_file.getvalue(),
-                        mime_map[ext],
-                        st.session_state.gemini_api_key,
-                    )
-            df_input = st.session_state[cache_key]
-    except Exception as e:
-        st.error(f"Errore durante la lettura del file: {e}")
-        st.stop()
-
-    if df_input is None or df_input.empty:
-        st.warning("Nessun dato trovato nel file caricato.")
-        st.stop()
-
-    cols_map = rileva_colonne_tabella(df_input)
-
-    if not cols_map["azienda"]:
-        st.error(
-            "Impossibile trovare la colonna delle aziende. Assicurati che si chiami 'Denominazione' o 'Azienda'."
-        )
-        st.stop()
-
-    df_backup, df_lavoro = prepara_backup_e_copia_oscurata(df_input, cols_map)
-    totale_da_elaborare = len(df_lavoro)
-    righe_con_fiscale = int(
-        (
-            (df_lavoro["_piva_input_norm"] != "")
-            | (df_lavoro["_cf_input_norm"] != "")
-        ).sum()
-    )
-
-    st.write(f"**File caricato:** `{file_name}` — **Imprese da elaborare:** `{totale_da_elaborare}`")
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Imprese in ricerca verificata", totale_da_elaborare)
-    c2.metric("Con P.IVA / C.F. già presenti", righe_con_fiscale)
-    c3.metric("Contatti originali oscurati", "100% protetti")
-
-    st.caption(
-        f"Colonne rilevate — Denominazione: `{cols_map['azienda']}` | "
-        f"Località: `{cols_map['localita'] or 'Non presente'}` | "
-        f"P.IVA: `{cols_map['piva'] or 'Non presente'}` | "
-        f"C.F.: `{cols_map['cf'] or 'Non presente'}` | "
-        f"Email: `{cols_map['email'] or 'Non presente'}` | "
-        f"Telefono: `{cols_map['telefono'] or 'Non presente'}` | "
-        f"Sito Web: `{cols_map['sito'] or 'Non presente'}`"
-    )
-
-    col_opt1, col_opt2 = st.columns([3, 2])
-    with col_opt1:
-        usa_gemini_search = st.checkbox(
-            "Attiva recupero su Google Search (tramite Gemini) se mancano email, telefono o sito",
-            value=bool(st.session_state.gemini_api_key),
-            disabled=not bool(st.session_state.gemini_api_key),
-            help="Usa solo denominazione, P.IVA/C.F. e località (mai i contatti del file originale) per cercare su Google i contatti ancora mancanti.",
-        )
-    with col_opt2:
-        backup_buf = io.BytesIO()
-        with pd.ExcelWriter(backup_buf, engine="openpyxl") as w_bkp:
-            df_backup.to_excel(w_bkp, sheet_name="Backup_Originale", index=False)
-        backup_buf.seek(0)
-        st.download_button(
-            label="Scarica copia di backup originale",
-            data=backup_buf.getvalue(),
-            file_name=f"{base_name}_BACKUP.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-    with st.expander("Anteprima file caricato (originale)", expanded=False):
-        st.dataframe(df_backup.head(20), use_container_width=True)
-
-    # ------------------------------------------
-    # STEP 3: ELABORAZIONE VERIFICATA DI OGNI IMPRESA
-    # ------------------------------------------
-    if st.button("Avvia ricerca", type="primary"):
-        col_azienda = cols_map["azienda"]
-        col_localita = cols_map["localita"]
-
-        risultati_primari_per_id = {}
-        gemini_avviso_mostrato = False
-        gemini_disabilitato_errore = False
-
-        progress_bar = st.progress(0)
-        status_placeholder = st.empty()
-        eta_placeholder = st.empty()
-
-        tempo_inizio = time.time()
-        stima_iniziale_per_riga = 5.5
+        righe_completate = 0
+        interrotto = False
 
         for idx_loop, (_, row) in enumerate(df_lavoro.iterrows()):
+            if stop_event.is_set():
+                interrotto = True
+                break
+
             id_riga = int(row["_id_riga_backup"])
             piva_nota = str(row["_piva_input_norm"]).strip()
             cf_noto = str(row["_cf_input_norm"]).strip()
@@ -2751,12 +2837,14 @@ if uploaded_file is not None:
                 tempo_rimanente = media_riga * (totale_da_elaborare - idx_loop)
 
             info_fiscale = f" (CF/P.IVA: {piva_nota or cf_noto})" if (piva_nota or cf_noto) else ""
-            status_placeholder.info(
-                f"[{st.session_state.profilo_attivo}] Elaborazione [{idx_loop + 1}/{totale_da_elaborare}]: "
-                f"**{azienda}**{info_fiscale}"
-            )
-            eta_placeholder.caption(
-                f"Tempo stimato rimanente: **{formatta_tempo(tempo_rimanente)}**"
+            aggiorna_job_memoria(
+                righe_elaborate=idx_loop,
+                azienda_corrente=f"{azienda}{info_fiscale}",
+                eta_secondi=tempo_rimanente,
+                messaggio_stato=(
+                    f"[{profilo}] Elaborazione [{idx_loop + 1}/{totale_da_elaborare}]: "
+                    f"**{azienda}**{info_fiscale}"
+                ),
             )
 
             # PRE-VERIFICA FISCALE: ricava sede/CAP reali da Ufficio Camerale
@@ -2775,14 +2863,16 @@ if uploaded_file is not None:
                 is_cf_persona_fisica(cf_noto) and not loc_per_maps and not cap_fiscale
             )
 
-            # LIVELLO 1: Google Places API (sempre eseguito -> raccoglie anche media recensioni)
-            candidati_maps = cerca_su_google_places(
+            # LIVELLO 1: Google Places API
+            candidati_maps, err_maps = cerca_su_google_places(
                 azienda,
                 loc_per_maps,
-                api_key=st.session_state.places_api_key,
+                api_key=places_api_key,
                 cap_hint=cap_fiscale,
                 persona_senza_sede=persona_senza_sede,
             )
+            if err_maps:
+                aggiungi_warning(err_maps)
             num_candidati = len(candidati_maps)
 
             miglior_risultato_riga = None
@@ -2809,7 +2899,7 @@ if uploaded_file is not None:
                     cf_finale = cf_uc or cf_finale
                     time.sleep(0.35)
 
-                # LIVELLO 2: Sito Web da Google Maps + JSON-LD + Cloudflare + fallback site:<dominio>
+                # LIVELLO 2: Sito Web da Google Maps
                 sito_verificato = ""
                 motivo_verifica = ""
                 email_sito = ""
@@ -2870,7 +2960,7 @@ if uploaded_file is not None:
                     piva_finale = seleziona_migliore(pive_sito)
                     cf_finale = cf_finale or (seleziona_migliore(cf_sito) if cf_sito else piva_finale)
 
-                # LIVELLO 3: DuckDuckGo Web (solo se manca email, telefono o sito)
+                # LIVELLO 3: DuckDuckGo Web
                 pive_web = []
                 cf_web = []
                 manca_tel = not (dati_maps["Telefono_Maps"] or tel_sito)
@@ -2925,7 +3015,7 @@ if uploaded_file is not None:
                 ancora_manca_sito = not sito_verificato
 
                 if ancora_manca_email or ancora_manca_tel or ancora_manca_sito:
-                    if not usa_gemini_search or not st.session_state.gemini_api_key:
+                    if not usa_gemini_search or not gemini_api_key:
                         stato_google_search = "Disattivato"
                     elif gemini_disabilitato_errore:
                         stato_google_search = "Disabilitato (errore chiave Gemini)"
@@ -2937,16 +3027,16 @@ if uploaded_file is not None:
                             piva_nota=piva_finale,
                             cf_noto=cf_finale,
                             sito_noto=sito_verificato,
-                            gemini_api_key=st.session_state.gemini_api_key,
+                            gemini_api_key=gemini_api_key,
                         )
                         if err_g:
                             err_low = err_g.lower()
                             if not gemini_avviso_mostrato:
                                 gemini_avviso_mostrato = True
-                                chiave_gem_nome = PROFILI_SECRETS[st.session_state.profilo_attivo][1]
-                                st.warning(
-                                    f"Google Search (Gemini) per {st.session_state.profilo_attivo} ha restituito un errore: "
-                                    f"`{err_g[:220]}`. Controlla la chiave `{chiave_gem_nome}` nei Secrets di Streamlit Cloud."
+                                chiave_gem_nome = PROFILI_SECRETS[profilo][1]
+                                aggiungi_warning(
+                                    f"Google Search (Gemini) per {profilo} ha restituito un errore: "
+                                    f"{err_g[:200]}. Controlla `{chiave_gem_nome}` nei Secrets."
                                 )
                             if any(
                                 k in err_low
@@ -3000,7 +3090,7 @@ if uploaded_file is not None:
                         if (email_gemini or tel_gemini) and not motivo_verifica:
                             motivo_verifica = "Alta (Google Search verificato)"
 
-                # Fallback fiscale solo se P.IVA ancora vuota
+                # Fallback fiscale
                 if not piva_finale:
                     piva_fb, cf_fb = cerca_piva_cf_fallback(
                         azienda,
@@ -3118,55 +3208,593 @@ if uploaded_file is not None:
             if miglior_risultato_riga is not None:
                 risultati_primari_per_id[id_riga] = miglior_risultato_riga
 
-            progress_bar.progress((idx_loop + 1) / totale_da_elaborare)
+            righe_completate = idx_loop + 1
+            aggiorna_job_memoria(righe_elaborate=righe_completate)
 
-        tempo_totale = time.time() - tempo_inizio
-        status_placeholder.success(
-            f"[{st.session_state.profilo_attivo}] Ricerca verificata completata su {totale_da_elaborare} imprese in **{formatta_tempo(tempo_totale)}**!"
-        )
-        eta_placeholder.empty()
+            # Checkpoint automatico su Supabase ogni N righe
+            if (
+                supa_url
+                and supa_key
+                and righe_completate < totale_da_elaborare
+                and righe_completate % CHECKPOINT_OGNI_N_RIGHE == 0
+            ):
+                try:
+                    _, _, chk_bytes, chk_stats = riallinea_e_crea_excel_2_fogli(
+                        df_backup=df_backup,
+                        risultati_primari_per_id=risultati_primari_per_id,
+                        cols_map=cols_map,
+                    )
+                    ok_up, _ = supabase_upload_excel(storage_path, chk_bytes, supa_url, supa_key)
+                    salva_su_supabase_record(
+                        "In corso",
+                        righe_completate,
+                        chk_stats,
+                        storage_path if ok_up else "",
+                        "",
+                    )
+                except Exception:
+                    pass
 
+        # Costruzione Excel finale (anche se fermato manualmente dall'utente)
         df_foglio1, df_foglio2, excel_bytes, stats = riallinea_e_crea_excel_2_fogli(
             df_backup=df_backup,
             risultati_primari_per_id=risultati_primari_per_id,
             cols_map=cols_map,
         )
 
-        st.session_state.df_foglio1 = df_foglio1
-        st.session_state.df_foglio2 = df_foglio2
-        st.session_state.risultato_excel = excel_bytes
-        st.session_state.nome_file_output = output_filename
-        st.session_state.stats_risultato = stats
+        stato_finale = "Interrotto (parziale)" if interrotto else "Completato"
+        tempo_totale = time.time() - tempo_inizio
+        path_salvato = ""
 
-# ------------------------------------------
-# STEP 4: VISUALIZZAZIONE RISULTATI E DOWNLOAD
-# ------------------------------------------
-if st.session_state.risultato_excel is not None:
-    st.divider()
-    st.subheader("Risultati elaborazione")
+        if supa_url and supa_key:
+            ok_up, err_up = supabase_upload_excel(storage_path, excel_bytes, supa_url, supa_key)
+            if ok_up:
+                path_salvato = storage_path
+            else:
+                aggiungi_warning(f"Errore caricamento Excel su Supabase Storage: {err_up}")
+            rec_finale = salva_su_supabase_record(
+                stato_finale, righe_completate, stats, path_salvato, err_up if not ok_up else ""
+            )
+        else:
+            rec_finale = {
+                "id": job_id,
+                "created_at": created_at_iso,
+                "profilo": profilo,
+                "file_originale": file_originale,
+                "file_output": output_filename,
+                "stato": stato_finale,
+                "totale_righe": int(totale_da_elaborare),
+                "righe_elaborate": int(righe_completate),
+                "nuove_email": int(stats["nuove_email"]),
+                "nuovi_telefoni": int(stats["nuovi_telefoni"]),
+                "nuovi_siti": int(stats["nuovi_siti"]),
+                "recensioni_google": int(stats["recensioni_google"]),
+                "storage_path": "",
+                "errore": "",
+            }
 
-    if st.session_state.stats_risultato:
-        s = st.session_state.stats_risultato
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Email trovate (in rosso)", s["nuove_email"])
-        m2.metric("Telefoni trovati (in rosso)", s["nuovi_telefoni"])
-        m3.metric("Siti Web ufficiali (in rosso)", s["nuovi_siti"])
-        m4.metric("Medie recensioni Google", s["recensioni_google"])
+        msg_finale = (
+            f"[{profilo}] Ricerca fermata a {righe_completate}/{totale_da_elaborare} imprese in "
+            f"**{formatta_tempo(tempo_totale)}** (risultati parziali salvati)."
+            if interrotto
+            else f"[{profilo}] Ricerca verificata completata su {totale_da_elaborare} imprese in "
+            f"**{formatta_tempo(tempo_totale)}**!"
+        )
 
-    st.download_button(
-        label=f"Scarica {st.session_state.nome_file_output}",
-        data=st.session_state.risultato_excel,
-        file_name=st.session_state.nome_file_output,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
+        aggiorna_job_memoria(
+            stato=stato_finale,
+            righe_elaborate=righe_completate,
+            eta_secondi=0,
+            messaggio_stato=msg_finale,
+            df_foglio1=df_foglio1,
+            df_foglio2=df_foglio2,
+            excel_bytes=excel_bytes,
+            stats=stats,
+            storage_path=path_salvato,
+            tempo_totale=tempo_totale,
+        )
+
+        with store["lock"]:
+            store["storico_locale"].insert(
+                0,
+                {
+                    **rec_finale,
+                    "_excel_bytes": excel_bytes,
+                },
+            )
+            store["storico_locale"] = store["storico_locale"][:25]
+
+    except Exception as exc:
+        err_str = str(exc)
+        salva_su_supabase_record("Errore", 0, {}, "", err_str)
+        aggiorna_job_memoria(
+            stato="Errore",
+            messaggio_stato=f"[{profilo}] Errore imprevisto durante la ricerca: {err_str}",
+            errore=err_str,
+        )
+
+
+def avvia_job_background(
+    profilo,
+    file_originale,
+    output_filename,
+    df_backup,
+    df_lavoro,
+    cols_map,
+    places_api_key,
+    gemini_api_key,
+    usa_gemini_search,
+):
+    store = get_job_store()
+    supa_url, supa_key = leggi_credenziali_supabase()
+
+    timestamp_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    job_id = f"{timestamp_id}_{profilo}_{uuid.uuid4().hex[:6]}"
+    safe_name = sanitizza_percorso_storage(output_filename)
+    storage_path = f"{job_id}/{safe_name}"
+    stop_event = threading.Event()
+
+    with store["lock"]:
+        esistente = store["profili"].get(profilo)
+        if esistente and esistente.get("stato") == "In corso":
+            return False
+
+        store["profili"][profilo] = {
+            "job_id": job_id,
+            "profilo": profilo,
+            "file_originale": file_originale,
+            "output_filename": output_filename,
+            "storage_path": storage_path,
+            "stato": "In corso",
+            "totale_righe": len(df_lavoro),
+            "righe_elaborate": 0,
+            "azienda_corrente": "",
+            "eta_secondi": len(df_lavoro) * 5.5,
+            "messaggio_stato": f"[{profilo}] Avvio ricerca in background su {len(df_lavoro)} imprese...",
+            "warnings": [],
+            "errore": "",
+            "df_foglio1": None,
+            "df_foglio2": None,
+            "excel_bytes": None,
+            "stats": None,
+            "stop_event": stop_event,
+        }
+
+    t = threading.Thread(
+        target=esegui_ricerca_background,
+        kwargs={
+            "store": store,
+            "job_id": job_id,
+            "profilo": profilo,
+            "file_originale": file_originale,
+            "output_filename": output_filename,
+            "storage_path": storage_path,
+            "df_backup": df_backup.copy(deep=True),
+            "df_lavoro": df_lavoro.copy(deep=True),
+            "cols_map": dict(cols_map),
+            "places_api_key": places_api_key,
+            "gemini_api_key": gemini_api_key,
+            "usa_gemini_search": usa_gemini_search,
+            "supa_url": supa_url,
+            "supa_key": supa_key,
+            "stop_event": stop_event,
+        },
+        daemon=True,
     )
+    t.start()
+    return True
 
-    tab1, tab2 = st.tabs(
-        ["Foglio 1 - Contatti Principali", "Foglio 2 - Altre Colonne e Dettagli"]
-    )
-    with tab1:
-        if st.session_state.df_foglio1 is not None:
-            st.dataframe(st.session_state.df_foglio1, use_container_width=True)
-    with tab2:
-        if st.session_state.df_foglio2 is not None:
-            st.dataframe(st.session_state.df_foglio2, use_container_width=True)
+
+# ==========================================
+# COMPONENTE LIVE PROGRESS IN BACKGROUND
+# ==========================================
+def _render_stato_job_interno(profilo):
+    job = leggi_job_profilo(profilo)
+    if not job:
+        return
+
+    stato = job.get("stato", "")
+    totale = max(1, int(job.get("totale_righe", 1)))
+    elab = int(job.get("righe_elaborate", 0))
+
+    if stato == "In corso":
+        st.info(job.get("messaggio_stato", f"[{profilo}] Elaborazione in corso..."))
+        st.progress(min(elab / totale, 1.0))
+        c_eta, c_btn1, c_btn2 = st.columns([3, 1, 1])
+        with c_eta:
+            st.caption(
+                f"Avanzamento: **{elab}/{totale}** — "
+                f"Tempo stimato rimanente: **{formatta_tempo(job.get('eta_secondi', 0))}** "
+                "(puoi anche chiudere questa scheda: la ricerca continua in background)."
+            )
+        with c_btn1:
+            if st.button("Aggiorna ora", key=f"btn_refresh_{profilo}"):
+                rerun_sicuro()
+        with c_btn2:
+            if st.button("Ferma e salva fin qui", key=f"btn_stop_{profilo}"):
+                richiedi_stop_profilo(profilo)
+                rerun_sicuro()
+
+        for w in job.get("warnings", []):
+            st.warning(w)
+    else:
+        rerun_sicuro()
+
+
+if hasattr(st, "fragment"):
+
+    @st.fragment(run_every=3)
+    def mostra_progresso_live(profilo):
+        _render_stato_job_interno(profilo)
+
+else:
+
+    def mostra_progresso_live(profilo):
+        _render_stato_job_interno(profilo)
+
+
+# ==========================================
+# INTERFACCIA UTENTE PRINCIPALE
+# ==========================================
+render_header()
+
+if "profilo_attivo" not in st.session_state:
+    st.session_state.profilo_attivo = ""
+if "places_api_key" not in st.session_state:
+    st.session_state.places_api_key = ""
+if "gemini_api_key" not in st.session_state:
+    st.session_state.gemini_api_key = ""
+if "storico_file_cache" not in st.session_state:
+    st.session_state.storico_file_cache = {}
+if "storico_anteprima_id" not in st.session_state:
+    st.session_state.storico_anteprima_id = ""
+
+supa_url_cfg, supa_key_cfg = leggi_credenziali_supabase()
+supabase_attivo = bool(supa_url_cfg and supa_key_cfg)
+
+tab_ricerca, tab_storico = st.tabs(["Nuova ricerca / In corso", "Storico ricerche"])
+
+# ==========================================
+# TAB 1: NUOVA RICERCA E LAVORI IN CORSO
+# ==========================================
+with tab_ricerca:
+    st.subheader("Seleziona profilo di lavoro")
+    col_p1, col_p2, col_p3 = st.columns(3)
+
+    for col_ui, nome_prof in zip([col_p1, col_p2, col_p3], ["PCF1", "PCF2", "PCF3"]):
+        attivo = st.session_state.profilo_attivo == nome_prof
+        job_prof = leggi_job_profilo(nome_prof)
+        in_corso_prof = bool(job_prof and job_prof.get("stato") == "In corso")
+
+        if in_corso_prof:
+            etichetta = (
+                f"{nome_prof} — In corso "
+                f"({job_prof.get('righe_elaborate', 0)}/{job_prof.get('totale_righe', 0)})"
+            )
+        elif attivo:
+            etichetta = f"{nome_prof} (Attivo)"
+        else:
+            etichetta = nome_prof
+
+        with col_ui:
+            if st.button(
+                etichetta,
+                type="primary" if attivo else "secondary",
+                use_container_width=True,
+                key=f"sel_prof_{nome_prof}",
+            ):
+                maps_k, gemini_k = carica_chiavi_profilo(nome_prof)
+                if not maps_k:
+                    st.error(
+                        f"Chiave `{PROFILI_SECRETS[nome_prof][0]}` mancante nei Secrets di Streamlit Cloud."
+                    )
+                else:
+                    st.session_state.profilo_attivo = nome_prof
+                    st.session_state.places_api_key = maps_k
+                    st.session_state.gemini_api_key = gemini_k
+                    st.rerun()
+
+    if not st.session_state.profilo_attivo:
+        st.info(
+            "Scegli **PCF1**, **PCF2** o **PCF3** per attivare l'account desiderato in questa finestra."
+        )
+    else:
+        prof = st.session_state.profilo_attivo
+        stato_gemini = "attiva" if st.session_state.gemini_api_key else "non configurata"
+        stato_supa = "connesso" if supabase_attivo else "non configurato (solo sessione)"
+        st.success(
+            f"Profilo attivo in questa scheda: **{prof}** "
+            f"(Google Maps API attiva | Gemini API {stato_gemini} | Storico Supabase {stato_supa})"
+        )
+
+        job_corrente = leggi_job_profilo(prof)
+
+        # Se su questo profilo c'è una ricerca in corso, mostra il monitor live
+        if job_corrente and job_corrente.get("stato") == "In corso":
+            st.divider()
+            st.subheader(f"Ricerca in corso su {prof}: `{job_corrente.get('file_originale', '')}`")
+            mostra_progresso_live(prof)
+        else:
+            # STEP 2: CARICAMENTO FILE, BACKUP E OSCURAMENTO MECCANICO
+            uploaded_file = st.file_uploader(
+                "Carica file",
+                type=["png", "jpg", "jpeg", "pdf", "csv", "xlsx", "xls", "ods"],
+                help="Formati supportati: PNG, JPG, JPEG, PDF, CSV, XLSX, XLS, ODS",
+                key=f"uploader_{prof}",
+            )
+
+            if uploaded_file is not None:
+                file_name = uploaded_file.name
+                base_name, ext = os.path.splitext(file_name)
+                ext = ext.lower()
+                output_filename = f"{base_name}_elaborato.xlsx"
+
+                df_input = None
+                errore_lettura = False
+
+                try:
+                    if ext in [".xlsx", ".xls", ".ods", ".csv"]:
+                        df_input = leggi_file_tabellare(uploaded_file.getvalue(), ext)
+                    elif ext in [".png", ".jpg", ".jpeg", ".pdf"]:
+                        if not st.session_state.gemini_api_key:
+                            chiave_gem_mancante = PROFILI_SECRETS[prof][1]
+                            st.error(
+                                f"Per leggere file immagine o PDF è necessario configurare `{chiave_gem_mancante}` "
+                                f"nei Secrets di Streamlit Cloud per {prof}."
+                            )
+                            errore_lettura = True
+                        else:
+                            cache_key = f"doc_df_{prof}_{file_name}_{uploaded_file.size}"
+                            if cache_key not in st.session_state:
+                                with st.spinner("Estrazione nominativi dal file con Gemini..."):
+                                    mime_map = {
+                                        ".png": "image/png",
+                                        ".jpg": "image/jpeg",
+                                        ".jpeg": "image/jpeg",
+                                        ".pdf": "application/pdf",
+                                    }
+                                    st.session_state[cache_key] = estrai_aziende_da_documento(
+                                        uploaded_file.getvalue(),
+                                        mime_map[ext],
+                                        st.session_state.gemini_api_key,
+                                    )
+                            df_input = st.session_state[cache_key]
+                except Exception as e:
+                    st.error(f"Errore durante la lettura del file: {e}")
+                    errore_lettura = True
+
+                if not errore_lettura:
+                    if df_input is None or df_input.empty:
+                        st.warning("Nessun dato trovato nel file caricato.")
+                    else:
+                        cols_map = rileva_colonne_tabella(df_input)
+                        if not cols_map["azienda"]:
+                            st.error(
+                                "Impossibile trovare la colonna delle aziende. Assicurati che si chiami 'Denominazione' o 'Azienda'."
+                            )
+                        else:
+                            df_backup, df_lavoro = prepara_backup_e_copia_oscurata(df_input, cols_map)
+                            totale_da_elaborare = len(df_lavoro)
+                            righe_con_fiscale = int(
+                                (
+                                    (df_lavoro["_piva_input_norm"] != "")
+                                    | (df_lavoro["_cf_input_norm"] != "")
+                                ).sum()
+                            )
+
+                            st.write(
+                                f"**File caricato:** `{file_name}` — **Imprese da elaborare:** `{totale_da_elaborare}`"
+                            )
+
+                            c1, c2, c3 = st.columns(3)
+                            c1.metric("Imprese in ricerca verificata", totale_da_elaborare)
+                            c2.metric("Con P.IVA / C.F. già presenti", righe_con_fiscale)
+                            c3.metric("Contatti originali oscurati", "100% protetti")
+
+                            st.caption(
+                                f"Colonne rilevate — Denominazione: `{cols_map['azienda']}` | "
+                                f"Località: `{cols_map['localita'] or 'Non presente'}` | "
+                                f"P.IVA: `{cols_map['piva'] or 'Non presente'}` | "
+                                f"C.F.: `{cols_map['cf'] or 'Non presente'}` | "
+                                f"Email: `{cols_map['email'] or 'Non presente'}` | "
+                                f"Telefono: `{cols_map['telefono'] or 'Non presente'}` | "
+                                f"Sito Web: `{cols_map['sito'] or 'Non presente'}`"
+                            )
+
+                            col_opt1, col_opt2 = st.columns([3, 2])
+                            with col_opt1:
+                                usa_gemini_search = st.checkbox(
+                                    "Attiva recupero su Google Search (tramite Gemini) se mancano email, telefono o sito",
+                                    value=bool(st.session_state.gemini_api_key),
+                                    disabled=not bool(st.session_state.gemini_api_key),
+                                    help="Usa solo denominazione, P.IVA/C.F. e località (mai i contatti del file originale) per cercare su Google i contatti ancora mancanti.",
+                                    key=f"chk_gemini_{prof}",
+                                )
+                            with col_opt2:
+                                backup_buf = io.BytesIO()
+                                with pd.ExcelWriter(backup_buf, engine="openpyxl") as w_bkp:
+                                    df_backup.to_excel(w_bkp, sheet_name="Backup_Originale", index=False)
+                                backup_buf.seek(0)
+                                st.download_button(
+                                    label="Scarica copia di backup originale",
+                                    data=backup_buf.getvalue(),
+                                    file_name=f"{base_name}_BACKUP.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    key=f"dl_backup_{prof}",
+                                )
+
+                            with st.expander("Anteprima file caricato (originale)", expanded=False):
+                                st.dataframe(df_backup.head(20), use_container_width=True)
+
+                            if st.button("Avvia ricerca in background", type="primary", key=f"start_{prof}"):
+                                avviato = avvia_job_background(
+                                    profilo=prof,
+                                    file_originale=file_name,
+                                    output_filename=output_filename,
+                                    df_backup=df_backup,
+                                    df_lavoro=df_lavoro,
+                                    cols_map=cols_map,
+                                    places_api_key=st.session_state.places_api_key,
+                                    gemini_api_key=st.session_state.gemini_api_key,
+                                    usa_gemini_search=usa_gemini_search,
+                                )
+                                if avviato:
+                                    st.rerun()
+                                else:
+                                    st.warning(f"Su {prof} è già attiva una ricerca in corso.")
+
+            # STEP 4: ULTIMO RISULTATO COMPLETATO PER QUESTO PROFILO
+            if job_corrente and job_corrente.get("stato") in ("Completato", "Interrotto (parziale)", "Errore"):
+                st.divider()
+                if job_corrente.get("stato") == "Errore":
+                    st.error(job_corrente.get("messaggio_stato", "Errore durante l'elaborazione."))
+                else:
+                    st.success(job_corrente.get("messaggio_stato", "Elaborazione completata."))
+                    for w in job_corrente.get("warnings", []):
+                        st.warning(w)
+
+                    if job_corrente.get("storage_path"):
+                        st.caption("Risultato salvato permanentemente nello **Storico ricerche** su Supabase.")
+
+                    stats = job_corrente.get("stats") or {}
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Email trovate (in rosso)", stats.get("nuove_email", 0))
+                    m2.metric("Telefoni trovati (in rosso)", stats.get("nuovi_telefoni", 0))
+                    m3.metric("Siti Web ufficiali (in rosso)", stats.get("nuovi_siti", 0))
+                    m4.metric("Medie recensioni Google", stats.get("recensioni_google", 0))
+
+                    if job_corrente.get("excel_bytes"):
+                        st.download_button(
+                            label=f"Scarica {job_corrente.get('output_filename', 'risultato.xlsx')}",
+                            data=job_corrente["excel_bytes"],
+                            file_name=job_corrente.get("output_filename", "risultato.xlsx"),
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary",
+                            key=f"dl_res_{job_corrente.get('job_id')}",
+                        )
+
+                    tab1, tab2 = st.tabs(
+                        ["Foglio 1 - Contatti Principali", "Foglio 2 - Altre Colonne e Dettagli"]
+                    )
+                    with tab1:
+                        if job_corrente.get("df_foglio1") is not None:
+                            st.dataframe(job_corrente["df_foglio1"], use_container_width=True)
+                    with tab2:
+                        if job_corrente.get("df_foglio2") is not None:
+                            st.dataframe(job_corrente["df_foglio2"], use_container_width=True)
+
+# ==========================================
+# TAB 2: STORICO PERMANENTE DELLE RICERCHE (SUPABASE)
+# ==========================================
+with tab_storico:
+    c_tit, c_agg = st.columns([4, 1])
+    with c_tit:
+        st.subheader("Storico ricerche salvate")
+    with c_agg:
+        if st.button("Aggiorna storico", use_container_width=True):
+            st.rerun()
+
+    if supabase_attivo:
+        righe_storico, err_hist = supabase_lista_storico(supa_url_cfg, supa_key_cfg, limit=50)
+        if err_hist:
+            st.error(
+                f"Impossibile leggere lo storico da Supabase: `{err_hist}`. "
+                "Verifica di aver creato la tabella `storico_ricerche` e inserito correttamente "
+                "`SUPABASE_URL` e `SUPABASE_SECRET_KEY` nei Secrets."
+            )
+    else:
+        st.info(
+            "Archivio permanente **Supabase** non ancora collegato nei Secrets (`SUPABASE_URL` e `SUPABASE_SECRET_KEY`). "
+            "Al momento vedi solo le ricerche completate in questa sessione del server."
+        )
+        store_tmp = get_job_store()
+        with store_tmp["lock"]:
+            righe_storico = list(store_tmp["storico_locale"])
+
+    if not righe_storico:
+        st.write("Nessuna ricerca salvata nello storico finora.")
+    else:
+        for item in righe_storico:
+            jid = item.get("id", "")
+            data_str = formatta_data_italiana(item.get("created_at", ""))
+            prof_item = item.get("profilo", "-")
+            file_orig = item.get("file_originale", "-")
+            file_out = item.get("file_output", "risultato.xlsx")
+            stato_item = item.get("stato", "-")
+            elab_item = item.get("righe_elaborate", 0)
+            tot_item = item.get("totale_righe", 0)
+            s_path = item.get("storage_path", "")
+
+            with st.container(border=True):
+                col_a, col_b, col_c = st.columns([4, 3, 2])
+                with col_a:
+                    st.markdown(f"**{file_orig}**")
+                    st.caption(
+                        f"Data: {data_str} | Profilo: **{prof_item}** | "
+                        f"Stato: **{stato_item}** ({elab_item}/{tot_item} imprese)"
+                    )
+                with col_b:
+                    st.caption(
+                        f"Email: **{item.get('nuove_email', 0)}** | "
+                        f"Telefoni: **{item.get('nuovi_telefoni', 0)}** | "
+                        f"Siti: **{item.get('nuovi_siti', 0)}** | "
+                        f"Recensioni: **{item.get('recensioni_google', 0)}**"
+                    )
+                    if item.get("errore"):
+                        st.caption(f"Nota: {item.get('errore')}")
+
+                with col_c:
+                    bytes_pronti = item.get("_excel_bytes") or st.session_state.storico_file_cache.get(jid)
+
+                    if bytes_pronti:
+                        st.download_button(
+                            label="Scarica Excel",
+                            data=bytes_pronti,
+                            file_name=file_out,
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            type="primary",
+                            use_container_width=True,
+                            key=f"hist_dl_{jid}",
+                        )
+                        if st.button("Anteprima", use_container_width=True, key=f"hist_prev_{jid}"):
+                            st.session_state.storico_anteprima_id = (
+                                "" if st.session_state.storico_anteprima_id == jid else jid
+                            )
+                            st.rerun()
+                    elif s_path and supabase_attivo:
+                        if st.button("Carica file", use_container_width=True, key=f"hist_load_{jid}"):
+                            with st.spinner("Recupero file da Supabase..."):
+                                dati_xl, err_dl = supabase_download_excel(s_path, supa_url_cfg, supa_key_cfg)
+                            if dati_xl:
+                                st.session_state.storico_file_cache[jid] = dati_xl
+                                st.rerun()
+                            else:
+                                st.error(f"Errore download: {err_dl}")
+                    else:
+                        st.caption("File non ancora pronto")
+
+                    if supabase_attivo and stato_item != "In corso":
+                        if st.button("Elimina", use_container_width=True, key=f"hist_del_{jid}"):
+                            ok_del, err_del = supabase_elimina_ricerca(
+                                jid, s_path, supa_url_cfg, supa_key_cfg
+                            )
+                            if ok_del:
+                                st.session_state.storico_file_cache.pop(jid, None)
+                                if st.session_state.storico_anteprima_id == jid:
+                                    st.session_state.storico_anteprima_id = ""
+                                st.rerun()
+                            else:
+                                st.error(f"Errore eliminazione: {err_del}")
+
+                # Anteprima dei due fogli direttamente nello Storico
+                if st.session_state.storico_anteprima_id == jid and bytes_pronti:
+                    try:
+                        df_h1 = pd.read_excel(io.BytesIO(bytes_pronti), sheet_name="Contatti_Principali", dtype=str)
+                        df_h2 = pd.read_excel(io.BytesIO(bytes_pronti), sheet_name="Altre_Colonne_e_Dettagli", dtype=str)
+                        ht1, ht2 = st.tabs(["Foglio 1 - Contatti Principali", "Foglio 2 - Altre Colonne e Dettagli"])
+                        with ht1:
+                            st.dataframe(df_h1, use_container_width=True)
+                        with ht2:
+                            st.dataframe(df_h2, use_container_width=True)
+                    except Exception as exc_prev:
+                        st.error(f"Impossibile mostrare l'anteprima: {exc_prev}")

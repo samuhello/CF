@@ -1,3 +1,4 @@
+import hmac
 import io
 import json
 import math
@@ -3040,7 +3041,7 @@ def esegui_ricerca_background(
                                 )
                             if any(
                                 k in err_low
-                                for k in ["api_key", "permission", "denied", "disabled", "403", "api key not valid"]
+                                for k in ["api_key", "permission", "denied", "disabled", "403", "402", "api key not valid", "resource_exhausted"]
                             ):
                                 gemini_disabilitato_errore = True
 
@@ -3438,6 +3439,41 @@ else:
 # ==========================================
 render_header()
 
+# ------------------------------------------
+# BLOCCO ACCESSO CON PIN (LETTO DAI SECRETS)
+# ------------------------------------------
+if "pin_autenticato" not in st.session_state:
+    st.session_state.pin_autenticato = False
+
+if not st.session_state.pin_autenticato:
+    try:
+        pin_corretto = str(st.secrets.get("APP_PIN", "") or "").strip()
+    except Exception:
+        pin_corretto = ""
+
+    if not pin_corretto:
+        st.error("Accesso bloccato: configura `APP_PIN` nei Secrets di Streamlit Cloud.")
+        st.stop()
+
+    col_pin, _ = st.columns([1, 2])
+    with col_pin:
+        with st.form("form_pin_accesso"):
+            pin_inserito = st.text_input(
+                "Inserisci il PIN (3 cifre)",
+                type="password",
+                max_chars=3,
+                placeholder="•••",
+            )
+            invia_pin = st.form_submit_button("Accedi", type="primary")
+            if invia_pin:
+                if hmac.compare_digest(pin_inserito.strip(), pin_corretto):
+                    st.session_state.pin_autenticato = True
+                    st.rerun()
+                else:
+                    time.sleep(1.5)
+                    st.error("PIN errato.")
+    st.stop()
+
 if "profilo_attivo" not in st.session_state:
     st.session_state.profilo_attivo = ""
 if "places_api_key" not in st.session_state:
@@ -3605,7 +3641,7 @@ with tab_ricerca:
                             with col_opt1:
                                 usa_gemini_search = st.checkbox(
                                     "Attiva recupero su Google Search (tramite Gemini) se mancano email, telefono o sito",
-                                    value=bool(st.session_state.gemini_api_key),
+                                    value=False,
                                     disabled=not bool(st.session_state.gemini_api_key),
                                     help="Usa solo denominazione, P.IVA/C.F. e località (mai i contatti del file originale) per cercare su Google i contatti ancora mancanti.",
                                     key=f"chk_gemini_{prof}",

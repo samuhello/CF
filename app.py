@@ -75,161 +75,48 @@ CF_CONTEXT_REGEX = (
 )
 
 ESTENSIONI_ESCLUSE = (
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".gif",
-    ".svg",
-    ".webp",
-    ".css",
-    ".js",
-    ".woff",
-    ".pdf",
-    ".mp4",
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".css", ".js", ".woff", ".pdf", ".mp4",
 )
 
 DOMINI_PEC = (
-    "legalmail.it",
-    "pec.it",
-    "arubapec.it",
-    "postacert",
-    "cert.it",
-    "sicurezzapostale.it",
-    "registerpec.it",
-    "telecompost.it",
-    "pec.",
+    "legalmail.it", "pec.it", "arubapec.it", "postacert", "cert.it",
+    "sicurezzapostale.it", "registerpec.it", "telecompost.it", "pec.",
 )
 
 # Portali, directory, aggregatori fiscali e social da NON salvare mai come sito ufficiale
 DOMINI_NON_UFFICIALI = (
-    "facebook.com",
-    "instagram.com",
-    "linkedin.com",
-    "tiktok.com",
-    "youtube.com",
-    "twitter.com",
-    "x.com",
-    "pinterest.",
-    "money.it",
-    "ufficiocamerale.it",
-    "reportaziende.it",
-    "fatturatoitalia.it",
-    "informazione-aziende.it",
-    "registroaziende.it",
-    "aziende.it",
-    "aziendit.com",
-    "aziendeitalia.",
-    "impreseitalia.",
-    "elencoaziende.",
-    "databaseaziende.",
-    "guidaaziende.",
-    "paginegialle.it",
-    "paginebianche.it",
-    "tuttocitta.it",
-    "virgilio.it",
-    "italiaonline.it",
-    "misterimprese.it",
-    "reteimprese.it",
-    "prontoimprese.it",
-    "infoimprese.it",
-    "registroimprese.it",
-    "infocamere.it",
-    "camcom.it",
-    "visura.it",
-    "visureitalia.",
-    "icribis.com",
-    "cribis.com",
-    "cerved.com",
-    "atoka.io",
-    "kompass.com",
-    "dnb.com",
-    "creditsafe.com",
-    "opencorporates.com",
-    "opencompanies.",
-    "northdata.",
-    "companyreports.",
-    "partitaiva.",
-    "verificapartitaiva.",
-    "codicefiscale.",
-    "europages.",
-    "cylex",
-    "infobel",
-    "hotfrog.",
-    "cybo.com",
-    "findglocal.",
-    "nicelocal.",
-    "restaurantguru.",
-    "sluurpy.",
-    "tripadvisor.",
-    "yelp.",
-    "trustpilot.",
-    "prontopro.",
-    "houzz.",
-    "habitissimo.",
-    "immobiliare.it",
-    "idealista.it",
-    "subito.it",
-    "bakeca.it",
-    "amazon.",
-    "ebay.",
-    "alibaba.",
-    "wikipedia.org",
-    "corriere.it",
-    "repubblica.it",
-    "ilsole24ore.com",
-    "ansa.it",
-    "gazzettaufficiale.it",
-    "agenziaentrate.gov.it",
-    "inps.it",
-    "inail.it",
-    "gov.it",
-    "zoominfo.",
-    "apollo.io",
-    "lusha.",
-    "rocketreach.",
-    "signalhire.",
-    "glassdoor.",
-    "indeed.",
-    "google.",
-    "vertexaisearch.",
-    "bing.",
-    "apple.com",
-    "microsoft.com",
-    "wixpress.com",
-    "sentry.io",
-    "schema.org",
-    "w3.org",
+    "facebook.com", "instagram.com", "linkedin.com", "tiktok.com", "youtube.com",
+    "twitter.com", "x.com", "pinterest.", "money.it", "ufficiocamerale.it",
+    "reportaziende.it", "fatturatoitalia.it", "informazione-aziende.it",
+    "registroaziende.it", "aziende.it", "aziendit.com", "aziendeitalia.",
+    "impreseitalia.", "elencoaziende.", "databaseaziende.", "guidaaziende.",
+    "paginegialle.it", "paginebianche.it", "tuttocitta.it", "virgilio.it",
+    "italiaonline.it", "misterimprese.it", "reteimprese.it", "prontoimprese.it",
+    "infoimprese.it", "registroimprese.it", "infocamere.it", "camcom.it",
+    "visura.it", "visureitalia.", "icribis.com", "cribis.com", "cerved.com",
+    "atoka.io", "kompass.com", "dnb.com", "creditsafe.com", "opencorporates.com",
+    "opencompanies.", "northdata.", "companyreports.", "partitaiva.",
+    "verificapartitaiva.", "codicefiscale.", "europages.", "cylex", "infobel",
+    "hotfrog.", "cybo.com", "findglocal.", "nicelocal.", "restaurantguru.",
+    "sluurpy.", "tripadvisor.", "yelp.", "trustpilot.", "prontopro.", "houzz.",
+    "habitissimo.", "immobiliare.it", "idealista.it", "subito.it", "bakeca.it",
+    "amazon.", "ebay.", "alibaba.", "wikipedia.org", "corriere.it", "repubblica.it",
+    "ilsole24ore.com", "ansa.it", "gazzettaufficiale.it", "agenziaentrate.gov.it",
+    "inps.it", "inail.it", "gov.it", "zoominfo.", "apollo.io", "lusha.",
+    "rocketreach.", "signalhire.", "glassdoor.", "indeed.", "google.",
+    "vertexaisearch.", "bing.", "apple.com", "microsoft.com", "wixpress.com",
+    "sentry.io", "schema.org", "w3.org",
 )
 
 PREFISSI_HOST_DIRECTORY = (
-    "aziende.",
-    "imprese.",
-    "elenco.",
-    "directory.",
-    "visure.",
-    "piva.",
-    "fatturato.",
-    "report.",
-    "bilanci.",
-    "registro.",
+    "aziende.", "imprese.", "elenco.", "directory.", "visure.",
+    "piva.", "fatturato.", "report.", "bilanci.", "registro.",
 )
 
 PREFISSI_EMAIL_ESCLUSI = (
-    "noreply",
-    "no-reply",
-    "donotreply",
-    "do-not-reply",
-    "mailer-daemon",
-    "postmaster",
-    "hostmaster",
-    "webmaster",
-    "abuse",
-    "sentry",
-    "example",
-    "esempio",
-    "placeholder",
-    "yourname",
-    "nome@",
+    "noreply", "no-reply", "donotreply", "do-not-reply", "mailer-daemon",
+    "postmaster", "hostmaster", "webmaster", "abuse", "sentry", "example",
+    "esempio", "placeholder", "yourname", "nome@",
 )
 
 STOPWORDS_AZIENDA = {
@@ -239,8 +126,9 @@ STOPWORDS_AZIENDA = {
     "ditta", "impresa", "azienda", "societa", "società", "gruppo", "group",
     "italia", "italy", "service", "servizi", "srl", "srls", "spa", "snc",
     "sas", "scarl", "cooperativa", "coop", "officina", "centro", "agenzia",
-    "attivita", "attività", "unipersonale", "semplificata", "nome", "collettivo",
-    "accomandita", "semplice", "azioni", "responsabilita", "limitata",
+    "attivita", "attività", "unipersonale", "semplificata", "nome",
+    "collettivo", "accomandita", "semplice", "azioni", "responsabilita",
+    "limitata",
 }
 
 PROFILI_SECRETS = {
@@ -269,7 +157,8 @@ def leggi_credenziali_supabase():
 def _supabase_headers(key, extra=None):
     """
     Prepara gli header corretti sia per le nuove chiavi sb_secret_...
-    (solo header `apikey` + User-Agent server non-browser) sia per le chiavi JWT legacy.
+    (solo header `apikey` + User-Agent server non-browser)
+    sia per le chiavi JWT legacy.
     """
     h = {
         "apikey": key,
@@ -404,8 +293,8 @@ def get_job_store():
     """
     return {
         "lock": threading.Lock(),
-        "profili": {},  # profilo -> dict stato job corrente/ultimo
-        "storico_locale": [],  # fallback in memoria se Supabase non è configurato
+        "profili": {},
+        "storico_locale": [],
     }
 
 
@@ -520,7 +409,7 @@ Per ottenere risultati precisi e veloci, ecco come strutturare al meglio il tuo 
 - **Colonne consigliate:** `P.IVA`, `C.F.` e `Città` (o `Comune`) aiutano PCF a centrare subito l'impresa esatta evitando omonimie. Se hai già `Email`, `Telefono` o `Sito Web`, lasciali pure: resteranno protetti e intatti.
 - **Formato testo:** se puoi, imposta `P.IVA`, `C.F.` e `Telefono` come **Testo** per non perdere eventuali zeri iniziali.
 
-**Il tuo file è leggermente diverso? Nessun problema!**  
+**Il tuo file è leggermente diverso? Nessun problema!**
 PCF si adatta in automatico: riconosce i nomi di colonna più comuni anche se scritti diversamente o in un altro ordine, funziona anche se mancano alcune colonne e conserva tutte le eventuali colonne extra nel **Foglio 2** del file finale.
             """
         )
@@ -689,9 +578,23 @@ def pulisci_nome_azienda(nome):
 
 def estrai_nome_commerciale(nome):
     base = pulisci_nome_azienda(nome)
+
+    # Gestione dei nomi separati da trattino:
+    # 1) "CAMPANIA DIGITAL INNOVATION HUB - RETE CONFINDUSTRIA" -> tiene la parte specifica a sinistra
+    # 2) "Distretto ad Alta Tecnologia ... - DATABENC" -> tiene la sigla/nome breve a destra
+    if " - " in base:
+        sinistra, destra = [p.strip(" -.,'") for p in base.split(" - ", 1)]
+        if (
+            re.search(r"\b(rete|gruppo|consorzio|sistema|divisione|brand)\b", destra, flags=re.IGNORECASE)
+            and len(sinistra) >= 4
+        ):
+            base = sinistra
+        elif len(destra.split()) <= 2 and len(destra) >= 4 and len(sinistra.split()) >= 4:
+            base = destra
+
     patterns_taglio = [
         r"\s+(?:dei\s+dott(?:or[ie]|\.?)|del\s+dott(?:\.|ore)?|della\s+dott(?:\.|ssa|oressa)?)\b.*$",
-        r"\s+di\s+[a-zà-ü0-9\s.'&\-]+(?:\be\s*c\.?|\b&\s*c\.?)$",
+        r"\s+di\s+[a-zà-ü0-9\s.'&-]+(?:\be\s*c\.?|\b&\s*c\.?)$",
         r"\s+agenzia\s+in\s+attivit[aà]'?\s+finanziaria\b.*$",
     ]
     risultato = base
@@ -764,7 +667,12 @@ def valida_piva(piva):
 
 
 def is_cf_persona_fisica(cf):
-    return bool(re.fullmatch(r"[A-Z]{6}\d{2}[A-EHLMPR-T]\d{2}[A-Z]\d{3}[A-Z]", str(cf).strip().upper()))
+    return bool(
+        re.fullmatch(
+            r"[A-Z]{6}\d{2}[A-EHLMPR-T]\d{2}[A-Z]\d{3}[A-Z]",
+            str(cf).strip().upper(),
+        )
+    )
 
 
 def normalizza_piva_input(val):
@@ -870,7 +778,9 @@ def pulisci_soup_portale(soup):
         attrs_str = " ".join(
             [
                 str(tag.get("id", "")),
-                " ".join(tag.get("class", [])) if isinstance(tag.get("class"), list) else str(tag.get("class", "")),
+                " ".join(tag.get("class", []))
+                if isinstance(tag.get("class"), list)
+                else str(tag.get("class", "")),
             ]
         ).lower()
         if any(k in attrs_str for k in ["footer", "cookie", "consent", "sidebar", "related", "simili", "competitor"]):
@@ -878,9 +788,7 @@ def pulisci_soup_portale(soup):
     return soup
 
 
-def normalizza_e_valida_telefono(
-    raw_phone, piva_nota="", cf_noto="", da_google_maps=False
-):
+def normalizza_e_valida_telefono(raw_phone, piva_nota="", cf_noto="", da_google_maps=False):
     if not raw_phone:
         return ""
 
@@ -1029,6 +937,12 @@ def _match_singolo_nome(nome_ref, nome_trovato):
     if a == b:
         return True
 
+    # Confronto compatto senza spazi (es. "012 factory" vs "012factory")
+    a_comp = re.sub(r"[^a-z0-9]", "", a)
+    b_comp = re.sub(r"[^a-z0-9]", "", b)
+    if len(a_comp) >= 4 and len(b_comp) >= 4 and a_comp == b_comp:
+        return True
+
     tok_a = set(token_significativi_azienda(nome_ref))
     tok_b = set(token_significativi_azienda(nome_trovato))
     if not tok_a or not tok_b:
@@ -1046,7 +960,9 @@ def _match_singolo_nome(nome_ref, nome_trovato):
     if len(tok_a) == 2:
         return len(comuni) == 2 and cov_b >= 0.50
 
-    if len(comuni) >= 2 and cov_b >= 0.80:
+    # Richiede copertura minima anche sul nome cercato (evita che "Confindustria Campania"
+    # faccia match su "Campania Digital Innovation Hub - Rete Confindustria")
+    if len(comuni) >= 2 and cov_b >= 0.80 and cov_a >= 0.50:
         return True
 
     return cov_a >= 0.66 and cov_b >= 0.45
@@ -1136,8 +1052,8 @@ def ddg_cerca_con_retry(query, max_results=6):
         try:
             with DDGS() as ddgs:
                 items = list(ddgs.text(query, region="it-it", max_results=max_results))
-            if items:
-                return items
+                if items:
+                    return items
         except Exception:
             pass
         if tentativo == 0:
@@ -1379,16 +1295,22 @@ def cerca_su_ufficio_camerale(
             match_fisc = testo_contiene_chiave_fiscale(
                 link + " " + testo_completo, piva_nota, cf_noto
             )
-            match_nome = nomi_corrispondono_stretto(nome_azienda, titolo_pag) or nomi_corrispondono_stretto(nome_azienda, titolo_item)
+            match_nome = nomi_corrispondono_stretto(
+                nome_azienda, titolo_pag
+            ) or nomi_corrispondono_stretto(nome_azienda, titolo_item)
 
             if ha_chiave_nota and not match_fisc:
                 continue
             if not ha_chiave_nota and not match_nome:
                 continue
 
-            if piva_nota and testo_contiene_chiave_fiscale(link + " " + testo_completo, piva_nota=piva_nota):
+            if piva_nota and testo_contiene_chiave_fiscale(
+                link + " " + testo_completo, piva_nota=piva_nota
+            ):
                 pive_trovate.insert(0, piva_nota)
-            if cf_noto and testo_contiene_chiave_fiscale(link + " " + testo_completo, cf_noto=cf_noto):
+            if cf_noto and testo_contiene_chiave_fiscale(
+                link + " " + testo_completo, cf_noto=cf_noto
+            ):
                 cf_trovati.insert(0, cf_noto)
 
             if not pive_trovate and not cf_trovati:
@@ -1411,7 +1333,11 @@ def cerca_su_ufficio_camerale(
             if match_nome:
                 score += 4
 
-            if not match_fisc and (citta or cap or indirizzo) and calcola_concordanza_indirizzo(testo_completo, indirizzo, cap, citta) < 2:
+            if (
+                not match_fisc
+                and (citta or cap or indirizzo)
+                and calcola_concordanza_indirizzo(testo_completo, indirizzo, cap, citta) < 2
+            ):
                 continue
 
             cap_trovato = ""
@@ -1649,7 +1575,11 @@ def cerca_contatti_su_dominio_ddg(dominio, piva_nota="", cf_noto=""):
     radice = radice_dominio(dominio)
     emails_uniche = list(dict.fromkeys(emails))
     emails_uniche.sort(
-        key=lambda e: (1 if is_email_pec(e) else 0, 0 if radice and radice in e.split("@")[-1] else 1, e)
+        key=lambda e: (
+            1 if is_email_pec(e) else 0,
+            0 if radice and radice in e.split("@")[-1] else 1,
+            e,
+        )
     )
     return (
         unisci_valori(*emails_uniche, lowercase=True, max_items=2),
@@ -1748,7 +1678,10 @@ def estrai_dati_da_sito(
                 if href_low.startswith("mailto:"):
                     aggiungi_email(href[7:].split("?")[0].strip())
                 elif href_low.startswith("tel:"):
-                    aggiungi_tel(urllib.parse.unquote(href[4:].split("?")[0].strip()), da_strutturato=True)
+                    aggiungi_tel(
+                        urllib.parse.unquote(href[4:].split("?")[0].strip()),
+                        da_strutturato=True,
+                    )
                 elif "facebook.com/" in href_low and "sharer" not in href_low and "Facebook" not in socials_sito:
                     socials_sito["Facebook"] = href
                 elif "instagram.com/" in href_low and "Instagram" not in socials_sito:
@@ -1773,7 +1706,9 @@ def estrai_dati_da_sito(
             pive_trovate.extend(pive)
             cf_trovati.extend(cfs)
 
-            if testo_contiene_chiave_fiscale(testo, piva_nota, cf_noto) or (piva_nota and piva_nota in pive_ld):
+            if testo_contiene_chiave_fiscale(testo, piva_nota, cf_noto) or (
+                piva_nota and piva_nota in pive_ld
+            ):
                 match_fiscale = True
             return soup
         except Exception:
@@ -1784,7 +1719,12 @@ def estrai_dati_da_sito(
     if soup_home is None:
         nome_breve = estrai_nome_commerciale(nome_azienda)
         tokens_az = token_significativi_azienda(nome_breve) or token_significativi_azienda(nome_azienda)
-        match_dom = any(t in dominio_base for t in tokens_az if len(t) >= 3)
+        nome_compatto = re.sub(r"[^a-z0-9]", "", normalizza_sigle_nome(nome_breve))
+        dom_compatto = re.sub(r"[^a-z0-9]", "", radice_dom)
+        match_dom = (
+            (len(nome_compatto) >= 4 and (nome_compatto in dom_compatto or dom_compatto in nome_compatto))
+            or any(t in dominio_base for t in tokens_az if len(t) >= 3)
+        )
         if da_google_maps or match_dom:
             em_d, tel_d, p_d, mf_d = cerca_contatti_su_dominio_ddg(
                 dominio_base, piva_nota=piva_nota, cf_noto=cf_noto
@@ -1822,7 +1762,8 @@ def estrai_dati_da_sito(
             "about",
             "dove-siamo",
             "dove siamo",
-            "info",
+            "/info",
+            "informazioni",
             "note-legali",
             "note legali",
             "cookie",
@@ -1839,7 +1780,7 @@ def estrai_dati_da_sito(
                     else:
                         pagine_da_visitare.append(link_completo)
 
-        for link in pagine_da_visitare[:4]:
+        for link in pagine_da_visitare[:6]:
             scansiona_pagina(link)
             if (
                 len(emails_trovate) > 1
@@ -1851,7 +1792,7 @@ def estrai_dati_da_sito(
         if len(emails_trovate) == 0:
             parsed_root = urllib.parse.urlparse(url_sito)
             base_origin = f"{parsed_root.scheme}://{parsed_root.netloc}"
-            for path_std in ["/contatti/", "/contatti", "/privacy/", "/privacy-policy/"]:
+            for path_std in ["/contatti/", "/contatti", "/contact/", "/contact", "/privacy/", "/privacy-policy/"]:
                 scansiona_pagina(base_origin + path_std)
                 if len(emails_trovate) > 0:
                     break
@@ -1864,25 +1805,51 @@ def estrai_dati_da_sito(
         return False, "", "", "", [], [], False, True, {}
 
     cf_sito_alpha = [c for c in cf_trovati if is_cf_persona_fisica(c)]
-    if cf_noto and is_cf_persona_fisica(cf_noto) and cf_sito_alpha and cf_noto not in cf_sito_alpha and not match_fiscale:
+    if (
+        cf_noto
+        and is_cf_persona_fisica(cf_noto)
+        and cf_sito_alpha
+        and cf_noto not in cf_sito_alpha
+        and not match_fiscale
+    ):
         return False, "", "", "", [], [], False, True, {}
 
+    # Priorità per i recapiti quando il sito ne ha molti (es. consorzi, hub, società con più uffici)
+    prefissi_prioritari = ("info@", "segreteria@", "contatti@", "amministrazione@", "ufficio@")
     if len(telefoni_trovati) > 4:
-        telefoni_trovati = []
+        telefoni_trovati = telefoni_trovati[:2]
     if len(emails_trovate) > 5:
-        emails_trovate = []
+        emails_trovate.sort(
+            key=lambda e: (
+                0 if e.startswith(prefissi_prioritari) else 1,
+                0 if radice_dom and radice_dom in e.split("@")[-1] else 1,
+                1 if is_email_pec(e) else 0,
+                e,
+            )
+        )
+        emails_trovate = emails_trovate[:2]
 
     testo_tutto = " ".join(testo_cumulato).lower()
     titoli_tutti = " ".join(titoli_pagine)
     nome_breve = estrai_nome_commerciale(nome_azienda)
     tokens_az = token_significativi_azienda(nome_breve) or token_significativi_azienda(nome_azienda)
 
-    match_dominio = any(t in dominio_base for t in tokens_az if len(t) >= 3)
+    nome_compatto = re.sub(r"[^a-z0-9]", "", normalizza_sigle_nome(nome_breve))
+    dom_compatto = re.sub(r"[^a-z0-9]", "", radice_dom)
+    titoli_compatti = re.sub(r"[^a-z0-9]", "", titoli_tutti)
+    testo_compatto_low = re.sub(r"[^a-z0-9]", "", testo_tutto[:15000])
+
+    match_dominio = (
+        (len(nome_compatto) >= 4 and (nome_compatto in dom_compatto or dom_compatto in nome_compatto))
+        or any(t in dominio_base for t in tokens_az if len(t) >= 3)
+    )
     match_titolo = (
-        sum(1 for t in tokens_az if t in titoli_tutti) >= max(1, min(2, len(tokens_az)))
+        (len(nome_compatto) >= 4 and nome_compatto in titoli_compatti)
+        or (sum(1 for t in tokens_az if t in titoli_tutti) >= max(1, min(2, len(tokens_az))))
     )
     match_testo_nome = (
-        sum(1 for t in tokens_az if t in testo_tutto) >= max(1, min(2, len(tokens_az)))
+        (len(nome_compatto) >= 4 and nome_compatto in testo_compatto_low)
+        or (sum(1 for t in tokens_az if t in testo_tutto) >= max(1, min(2, len(tokens_az))))
     )
     match_geo = calcola_concordanza_indirizzo(testo_tutto, cap=cap, citta=citta) >= 2
 
@@ -1897,6 +1864,13 @@ def estrai_dati_da_sito(
         else:
             verificato = True
             motivo = "Alta (Google Maps + Sito coerente)"
+    elif (
+        len(nome_compatto) >= 5
+        and (nome_compatto == dom_compatto or nome_compatto in dom_compatto)
+        and match_testo_nome
+    ):
+        verificato = True
+        motivo = "Alta (Dominio corrispondente al nome)"
     elif (match_dominio or match_titolo) and match_testo_nome and (match_geo or not (citta or cap)):
         verificato = True
         motivo = "Media (Sito verificato Nome + Sede)"
@@ -1919,7 +1893,12 @@ def estrai_dati_da_sito(
 
     emails_ordinate = sorted(
         emails_trovate,
-        key=lambda e: (1 if is_email_pec(e) else 0, 0 if radice_dom and radice_dom in e.split("@")[-1] else 1, e),
+        key=lambda e: (
+            1 if is_email_pec(e) else 0,
+            0 if e.startswith(prefissi_prioritari) else 1,
+            0 if radice_dom and radice_dom in e.split("@")[-1] else 1,
+            e,
+        ),
     )[:2]
     telefoni_finali = telefoni_trovati[:2]
 
@@ -1948,17 +1927,9 @@ def visita_scheda_terza_verificata(
     if any(
         d in url_low
         for d in [
-            "facebook.com",
-            "instagram.com",
-            "linkedin.com",
-            "tiktok.com",
-            "youtube.com",
-            "ufficiocamerale.it",
-            "money.it",
-            "reportaziende.it",
-            "fatturatoitalia.it",
-            "informazione-aziende.it",
-            "registroaziende.it",
+            "facebook.com", "instagram.com", "linkedin.com", "tiktok.com",
+            "youtube.com", "ufficiocamerale.it", "money.it", "reportaziende.it",
+            "fatturatoitalia.it", "informazione-aziende.it", "registroaziende.it",
             "aziende.it",
         ]
     ):
@@ -2133,12 +2104,18 @@ def cerca_su_duckduckgo_web(
                 root_url = f"{parsed.scheme}://{parsed.netloc}"
                 if root_url not in siti_radice_visti:
                     siti_radice_visti.add(root_url)
-                    candidati_sito.append((0 if q_idx == 0 and (piva_nota or cf_noto) else 1, root_url))
+                    candidati_sito.append(
+                        (0 if q_idx == 0 and (piva_nota or cf_noto) else 1, root_url)
+                    )
             else:
                 if len(altri_link) < 3 and (match_fisc_snip or match_nome_snip):
                     altri_link.append(link)
 
-        if q_idx == 0 and len(queries) > 1 and (emails_totali and telefoni_totali and (candidati_sito or dominio_verificato)):
+        if (
+            q_idx == 0
+            and len(queries) > 1
+            and (emails_totali and telefoni_totali and (candidati_sito or dominio_verificato))
+        ):
             break
         if q_idx == 0 and len(queries) > 1:
             time.sleep(0.5)
@@ -2251,7 +2228,7 @@ def cerca_con_gemini_google_search(
         f"{riga_sito}\n"
         "REGOLE:\n"
         "1. Usa Google Search e riporta SOLO dati verificati per questa esatta impresa "
-        "(se P.IVA o C.F. sono noti, non confonderla con aziende omonime).\n"
+        "(se P.IVA o C.F. sono noti, non confonderla con aziende omonime o enti di rete diversi).\n"
         "2. Separa l'email ordinaria ('email') dalla PEC ('pec'). Non inventare mai nulla.\n"
         "3. Nel campo 'sito_web' metti solo il sito ufficiale dell'azienda (mai portali come ufficiocamerale.it, paginegialle.it, money.it, facebook.com).\n"
         "4. Nel campo 'telefono' non inserire mai la Partita IVA.\n"
@@ -2486,11 +2463,7 @@ def pulisci_duplicati_trasversali(risultati_primari_per_id, df_backup, cols_map)
     return risultati_copia
 
 
-def riallinea_e_crea_excel_2_fogli(
-    df_backup,
-    risultati_primari_per_id,
-    cols_map,
-):
+def riallinea_e_crea_excel_2_fogli(df_backup, risultati_primari_per_id, cols_map):
     risultati_puliti = pulisci_duplicati_trasversali(
         risultati_primari_per_id, df_backup, cols_map
     )
@@ -2879,6 +2852,9 @@ def esegui_ricerca_background(
             miglior_risultato_riga = None
             miglior_punteggio_riga = -1
 
+            nome_comm_target = estrai_nome_commerciale(azienda)
+            tokens_distintivi = token_significativi_azienda(nome_comm_target)
+
             for pos_omonimo, dati_maps in enumerate(candidati_maps, start=1):
                 loc_effettiva = loc_per_maps or dati_maps.get("Citta_Maps", "")
                 indirizzo_maps = dati_maps.get("Indirizzo", "")
@@ -2954,7 +2930,11 @@ def esegui_ricerca_background(
                     indirizzo_maps = ""
                     cap_maps = cap_fiscale
 
-                if persona_senza_sede and not match_fiscale_sito and len(token_significativi_azienda(estrai_nome_commerciale(azienda))) <= 2:
+                if (
+                    persona_senza_sede
+                    and not match_fiscale_sito
+                    and len(token_significativi_azienda(estrai_nome_commerciale(azienda))) <= 2
+                ):
                     dati_maps["Telefono_Maps"] = ""
 
                 if not piva_finale and pive_sito and (match_fiscale_sito or not cf_noto):
@@ -3012,7 +2992,9 @@ def esegui_ricerca_background(
                 stato_google_search = "Non necessario (contatti già completi)"
 
                 ancora_manca_email = not (email_sito or dati_maps.get("Email_Web"))
-                ancora_manca_tel = not (dati_maps.get("Telefono_Maps") or tel_sito or dati_maps.get("Telefono_Web"))
+                ancora_manca_tel = not (
+                    dati_maps.get("Telefono_Maps") or tel_sito or dati_maps.get("Telefono_Web")
+                )
                 ancora_manca_sito = not sito_verificato
 
                 if ancora_manca_email or ancora_manca_tel or ancora_manca_sito:
@@ -3041,7 +3023,10 @@ def esegui_ricerca_background(
                                 )
                             if any(
                                 k in err_low
-                                for k in ["api_key", "permission", "denied", "disabled", "403", "402", "api key not valid", "resource_exhausted"]
+                                for k in [
+                                    "api_key", "permission", "denied", "disabled",
+                                    "403", "402", "api key not valid", "resource_exhausted",
+                                ]
                             ):
                                 gemini_disabilitato_errore = True
 
@@ -3201,6 +3186,16 @@ def esegui_ricerca_background(
                     score_cand += 1
                 if valore_presente(dati_maps.get("Valutazione_Media")):
                     score_cand += 1
+
+                # Premia i candidati il cui nome o sito contiene davvero le parole distintive principali
+                nome_maps_low = normalizza_sigle_nome(dati_maps.get("Nome_Maps", ""))
+                dom_low = estrai_dominio(sito_verificato)
+                if tokens_distintivi:
+                    trovati_dist = sum(
+                        1 for t in tokens_distintivi if t in nome_maps_low or t in dom_low
+                    )
+                    if trovati_dist >= max(1, math.ceil(len(tokens_distintivi) * 0.6)):
+                        score_cand += 4
 
                 if score_cand > miglior_punteggio_riga:
                     miglior_punteggio_riga = score_cand
@@ -3423,13 +3418,10 @@ def _render_stato_job_interno(profilo):
 
 
 if hasattr(st, "fragment"):
-
     @st.fragment(run_every=3)
     def mostra_progresso_live(profilo):
         _render_stato_job_interno(profilo)
-
 else:
-
     def mostra_progresso_live(profilo):
         _render_stato_job_interno(profilo)
 
@@ -3718,6 +3710,7 @@ with tab_ricerca:
                     with tab2:
                         if job_corrente.get("df_foglio2") is not None:
                             st.dataframe(job_corrente["df_foglio2"], use_container_width=True)
+
 
 # ==========================================
 # TAB 2: STORICO PERMANENTE DELLE RICERCHE (SUPABASE)

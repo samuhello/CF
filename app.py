@@ -64,7 +64,11 @@ CONTESTO_NON_TELEFONO_REGEX = re.compile(
 )
 
 PIVA_CONTEXT_REGEX = (
-    r"(?:p\.?\s*i\.?\s*v\.?\s*a\.?|partita\s*iva|p\.?\s*i\.?|vat|c\.?\s*f\.?\s*(?:e|/|-)\s*p\.?\s*i(?:va)?)"
+    r"(?:p\.?\s*i\.?\s*v\.?\s*a\.?|partita\s*iva|p\.?\s*i\.?|vat|"
+    r"c\.?\s*f\.?\s*(?:e|/|-)\s*p\.?\s*i(?:va)?\.?|"
+    r"p\.?\s*i(?:va)?\.?\s*(?:e|/|-)\s*c\.?\s*f\.?|"
+    r"codice\s*fiscale\s*(?:e|/|-)\s*partita\s*iva|"
+    r"partita\s*iva\s*(?:e|/|-)\s*codice\s*fiscale)"
     r"[\s:.\-n°]*(?:IT)?\s*(\d[\d\s.\-]{9,13}\d)\b"
 )
 PIVA_IT_REGEX = r"\bIT[\s.\-]?(\d{11})\b"
@@ -129,6 +133,18 @@ STOPWORDS_AZIENDA = {
     "attivita", "attività", "unipersonale", "semplificata", "nome",
     "collettivo", "accomandita", "semplice", "azioni", "responsabilita",
     "limitata",
+}
+
+PAROLE_GENERICHE_ENTI = {
+    "distretto", "tecnologia", "tecnologie", "culturale", "culturali", "campania",
+    "confindustria", "fondazione", "consorzio", "innovazione", "innovation",
+    "digital", "digitale", "rete", "italia", "italiana", "napoli", "milano",
+    "roma", "torino", "bologna", "firenze", "venezia", "servizi", "impresa",
+    "imprese", "centro", "studio", "gruppo", "sistema", "progetto", "ricerca",
+    "sviluppo", "alta", "beni", "polo", "terra", "associazione", "federazione",
+    "istituto", "camera", "commercio", "unione", "regionale", "nazionale",
+    "internazionale", "holding", "capital", "partners", "consulting", "solutions",
+    "startup", "start", "factory", "academy", "energy", "green", "smart",
 }
 
 PROFILI_SECRETS = {
@@ -560,12 +576,17 @@ def valore_presente(val):
 def pulisci_nome_azienda(nome):
     pulito = re.sub(
         r"\b("
-        r"s\.?r\.?l\.?s?|s\.?p\.?a\.?|s\.?n\.?c\.?|s\.?a\.?s\.?|s\.?c\.?a\.?r\.?l\.?|"
+        r"s\.?\s*r\.?\s*l\.?\s*s?|"
+        r"s\.?\s*p\.?\s*a\.?|"
+        r"s\.?\s*n\.?\s*c\.?|"
+        r"s\.?\s*a\.?\s*s\.?|"
+        r"s\.?\s*c\.?\s*a\.?\s*r\.?\s*l\.?|"
+        r"soc\.?\s*cons\.?\s*a\.?\s*r\.?\s*l\.?|"
         r"societ[aà]'?\s+a\s+responsabilit[aà]'?\s+limitata(?:\s+semplificata)?|"
         r"societ[aà]'?\s+in\s+nome\s+collettivo|"
         r"societ[aà]'?\s+in\s+accomandita\s+semplice|"
         r"societ[aà]'?\s+per\s+azioni|"
-        r"societ[aà]'?\s+cooperativa(?:\s+a\s+r\.?l\.?)?|"
+        r"societ[aà]'?\s+cooperativa(?:\s+a\s+r\.?\s*l\.?)?|"
         r"unipersonale|in\s+liquidazione|ditta\s+individuale"
         r")\b",
         "",
@@ -609,6 +630,65 @@ def estrai_nome_commerciale(nome):
             risultato = prima
 
     return risultato if len(risultato) >= 3 else base
+
+
+def genera_varianti_nome_ricerca(nome_azienda):
+    """
+    Genera le varianti di ricerca in ordine di priorità:
+    1. Se il nome pulito è di 1 sola parola e l'originale ha forma giuridica (es. 'Zest S.p.A.'),
+       mantiene la forma giuridica nella prima query per evitare omonimie.
+    2. Per nomi composti/multi-parola (es. 'Facile Start Up' o 'FacileStartup'),
+       prova PRIMA la versione unita e POI quella separata.
+    3. Per denominazioni molto lunghe (es. 'Distretto Databenc DISTRETTO AD ALTA TECNOLOGIA...'),
+       aggiunge come fallback il token distintivo breve ('Databenc').
+    """
+    orig = re.sub(r"\s+", " ", str(nome_azienda or "")).strip()
+    nome_breve = estrai_nome_commerciale(orig)
+    tokens_brevi = token_significativi_azienda(nome_breve)
+
+    varianti = []
+
+    def aggiungi(v):
+        v = re.sub(r"\s+", " ", str(v or "")).strip(" -.,'")
+        if len(v) >= 3 and v.lower() not in {x.lower() for x in varianti}:
+            varianti.append(v)
+
+    # Caso 1: nome di una sola parola con forma giuridica nell'originale (es. "Zest S.p.A.")
+    if len(tokens_brevi) == 1 and orig.lower() != nome_breve.lower():
+        aggiungi(orig)
+
+    # Caso 2: PRIMA unito, POI separato
+    unito_composti = re.sub(
+        r"\b(start|co|e|hi|bio|fin|digi|web|net|smart|tech)\s+(up|working|commerce|tech|site|lab|hub|app)\b",
+        r"\1\2",
+        nome_breve,
+        flags=re.IGNORECASE,
+    )
+    if unito_composti.lower() != nome_breve.lower():
+        aggiungi(unito_composti)
+
+    parole_brevi = nome_breve.split()
+    if 2 <= len(parole_brevi) <= 3:
+        tutto_unito = "".join(parole_brevi)
+        if len(tutto_unito) <= 24:
+            aggiungi(tutto_unito)
+        aggiungi(nome_breve)
+    else:
+        aggiungi(nome_breve)
+        separato = re.sub(r"(?<=[a-z])(?=[A-Z])|(?<=\d)(?=[A-Za-z])|(?<=[A-Za-z])(?=\d)", " ", nome_breve)
+        if separato.lower() != nome_breve.lower():
+            aggiungi(separato)
+
+    # Caso 3: Denominazioni molto lunghe -> aggiungi il token distintivo (es. "Databenc")
+    if len(tokens_brevi) >= 4:
+        distintivi = [
+            t for t in tokens_brevi
+            if len(t) >= 6 and t not in PAROLE_GENERICHE_ENTI
+        ]
+        if distintivi:
+            aggiungi(distintivi[0])
+
+    return varianti[:4]
 
 
 def normalizza_sigle_nome(nome):
@@ -937,11 +1017,14 @@ def _match_singolo_nome(nome_ref, nome_trovato):
     if a == b:
         return True
 
-    # Confronto compatto senza spazi (es. "012 factory" vs "012factory")
+    # Confronto compatto senza spazi (es. "Facile Start Up" vs "Facile Startup Srl" o "012factory")
     a_comp = re.sub(r"[^a-z0-9]", "", a)
     b_comp = re.sub(r"[^a-z0-9]", "", b)
     if len(a_comp) >= 4 and len(b_comp) >= 4 and a_comp == b_comp:
         return True
+    if len(a_comp) >= 6 and len(b_comp) >= 6:
+        if a_comp in b_comp or b_comp in a_comp:
+            return True
 
     tok_a = set(token_significativi_azienda(nome_ref))
     tok_b = set(token_significativi_azienda(nome_trovato))
@@ -959,6 +1042,11 @@ def _match_singolo_nome(nome_ref, nome_trovato):
         return cov_a == 1.0 and cov_b >= 0.50
     if len(tok_a) == 2:
         return len(comuni) == 2 and cov_b >= 0.50
+
+    # Match per sigla/nome breve distintivo dentro denominazioni lunghe (es. "DATABENC" in "Distretto Databenc ...")
+    if len(tok_a) >= 4 and len(tok_b) <= 2 and cov_b == 1.0:
+        if any(len(t) >= 6 and t not in PAROLE_GENERICHE_ENTI for t in comuni):
+            return True
 
     # Richiede copertura minima anche sul nome cercato (evita che "Confindustria Campania"
     # faccia match su "Campania Digital Innovation Hub - Rete Confindustria")
@@ -1048,7 +1136,7 @@ def formatta_tempo(secondi):
 
 
 def ddg_cerca_con_retry(query, max_results=6):
-    for tentativo in range(2):
+    for tentativo in range(3):
         try:
             with DDGS() as ddgs:
                 items = list(ddgs.text(query, region="it-it", max_results=max_results))
@@ -1056,8 +1144,8 @@ def ddg_cerca_con_retry(query, max_results=6):
                     return items
         except Exception:
             pass
-        if tentativo == 0:
-            time.sleep(0.8)
+        if tentativo < 2:
+            time.sleep(1.0 * (tentativo + 1))
     return []
 
 
@@ -1399,17 +1487,6 @@ def cerca_su_google_places(
         ),
     }
 
-    nome_query = estrai_nome_commerciale(nome_azienda)
-    parti_query = [nome_query]
-    if cap_hint:
-        parti_query.append(cap_hint)
-    if localita:
-        parti_query.append(localita)
-    parti_query.append("Italia")
-    query = ", ".join(p for p in parti_query if str(p).strip())
-
-    payload = {"textQuery": query, "maxResultCount": 5}
-
     risultato_vuoto = [
         {
             "Trovato_Maps": "No",
@@ -1427,109 +1504,129 @@ def cerca_su_google_places(
         }
     ]
 
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        data = response.json()
+    varianti_nome = genera_varianti_nome_ricerca(nome_azienda)
+    nome_query_base = estrai_nome_commerciale(nome_azienda)
+    ultimo_errore = ""
 
-        if "error" in data:
-            err_msg = (
-                f"Errore Google Places API per '{nome_azienda}': "
-                f"{data['error'].get('message', '')}"
-            )
-            return risultato_vuoto, err_msg
+    for nome_query in varianti_nome:
+        parti_query = [nome_query]
+        if cap_hint:
+            parti_query.append(cap_hint)
+        if localita:
+            parti_query.append(localita)
+        parti_query.append("Italia")
+        query = ", ".join(p for p in parti_query if str(p).strip())
 
-        places = data.get("places", [])
-        if not places:
-            return risultato_vuoto, ""
+        payload = {"textQuery": query, "maxResultCount": 5}
 
-        candidati = [
-            p
-            for p in places
-            if nomi_corrispondono_stretto(
-                nome_azienda, p.get("displayName", {}).get("text", "")
-            )
-        ]
-        if not candidati:
-            return risultato_vuoto, ""
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+            data = response.json()
 
-        risultati = []
-        indirizzi_visti = set()
+            if "error" in data:
+                ultimo_errore = (
+                    f"Errore Google Places API per '{nome_azienda}': "
+                    f"{data['error'].get('message', '')}"
+                )
+                return risultato_vuoto, ultimo_errore
 
-        for place in candidati:
-            indirizzo = place.get("formattedAddress", "")
-            if indirizzo and indirizzo in indirizzi_visti:
-                continue
-            indirizzi_visti.add(indirizzo)
-
-            cap = ""
-            citta = ""
-            for comp in place.get("addressComponents", []):
-                types_list = comp.get("types", [])
-                if "postal_code" in types_list:
-                    cap = comp.get("longText", "")
-                if "locality" in types_list:
-                    citta = comp.get("longText", "")
-
-            if cap_hint and cap and cap[:2] != cap_hint[:2]:
-                continue
-            if (
-                localita
-                and citta
-                and len(localita.strip()) >= 3
-                and localita.strip().lower() not in indirizzo.lower()
-                and citta.strip().lower() not in localita.strip().lower()
-                and not (cap_hint and cap[:2] == cap_hint[:2])
-            ):
+            places = data.get("places", [])
+            if not places:
                 continue
 
-            sito_raw = place.get("websiteUri", "")
-            sito_pulito = sito_raw if sembra_sito_ufficiale(sito_raw) else ""
-            tel_maps_valido = normalizza_e_valida_telefono(
-                place.get("nationalPhoneNumber", ""),
-                da_google_maps=True,
-            )
+            candidati = [
+                p
+                for p in places
+                if nomi_corrispondono_stretto(
+                    nome_azienda, p.get("displayName", {}).get("text", "")
+                )
+                or nomi_corrispondono_stretto(
+                    nome_query, p.get("displayName", {}).get("text", "")
+                )
+            ]
+            if not candidati:
+                continue
 
-            risultati.append(
-                {
-                    "Trovato_Maps": "Sì",
-                    "Nome_Maps": place.get("displayName", {}).get("text", ""),
-                    "Stato_Attivita": place.get("businessStatus", ""),
-                    "Valutazione_Media": place.get("rating", ""),
-                    "Numero_Recensioni": place.get("userRatingCount", ""),
-                    "Indirizzo": indirizzo,
-                    "CAP": cap,
-                    "Citta_Maps": citta,
-                    "Telefono_Maps": tel_maps_valido,
-                    "Sito_Web": sito_pulito,
-                    "Dominio": estrai_dominio(sito_pulito),
-                    "Link_Maps": place.get("googleMapsUri", ""),
-                }
-            )
+            risultati = []
+            indirizzi_visti = set()
 
-        if not risultati:
-            return risultato_vuoto, ""
+            for place in candidati:
+                indirizzo = place.get("formattedAddress", "")
+                if indirizzo and indirizzo in indirizzi_visti:
+                    continue
+                indirizzi_visti.add(indirizzo)
 
-        if persona_senza_sede and len(token_significativi_azienda(nome_query)) <= 2:
+                cap = ""
+                citta = ""
+                for comp in place.get("addressComponents", []):
+                    types_list = comp.get("types", [])
+                    if "postal_code" in types_list:
+                        cap = comp.get("longText", "")
+                    if "locality" in types_list:
+                        citta = comp.get("longText", "")
+
+                if cap_hint and cap and cap[:2] != cap_hint[:2]:
+                    continue
+                if (
+                    localita
+                    and citta
+                    and len(localita.strip()) >= 3
+                    and localita.strip().lower() not in indirizzo.lower()
+                    and citta.strip().lower() not in localita.strip().lower()
+                    and not (cap_hint and cap[:2] == cap_hint[:2])
+                ):
+                    continue
+
+                sito_raw = place.get("websiteUri", "")
+                sito_pulito = sito_raw if sembra_sito_ufficiale(sito_raw) else ""
+                tel_maps_valido = normalizza_e_valida_telefono(
+                    place.get("nationalPhoneNumber", ""),
+                    da_google_maps=True,
+                )
+
+                risultati.append(
+                    {
+                        "Trovato_Maps": "Sì",
+                        "Nome_Maps": place.get("displayName", {}).get("text", ""),
+                        "Stato_Attivita": place.get("businessStatus", ""),
+                        "Valutazione_Media": place.get("rating", ""),
+                        "Numero_Recensioni": place.get("userRatingCount", ""),
+                        "Indirizzo": indirizzo,
+                        "CAP": cap,
+                        "Citta_Maps": citta,
+                        "Telefono_Maps": tel_maps_valido,
+                        "Sito_Web": sito_pulito,
+                        "Dominio": estrai_dominio(sito_pulito),
+                        "Link_Maps": place.get("googleMapsUri", ""),
+                    }
+                )
+
+            if not risultati:
+                continue
+
+            if persona_senza_sede and len(token_significativi_azienda(nome_query_base)) <= 2:
+                if len(risultati) > 1:
+                    risultati_con_sito = [r for r in risultati if r.get("Sito_Web")]
+                    if not risultati_con_sito:
+                        continue
+                    risultati = risultati_con_sito
+
+            def priorita_geo(r):
+                p = 0
+                if cap_hint and r.get("CAP") == cap_hint:
+                    p -= 4
+                if localita and localita.strip().lower() in r.get("Indirizzo", "").lower():
+                    p -= 2
+                return p
+
             if len(risultati) > 1:
-                risultati_con_sito = [r for r in risultati if r.get("Sito_Web")]
-                if not risultati_con_sito:
-                    return risultato_vuoto, ""
-                risultati = risultati_con_sito
+                risultati.sort(key=priorita_geo)
 
-        def priorita_geo(r):
-            p = 0
-            if cap_hint and r.get("CAP") == cap_hint:
-                p -= 4
-            if localita and localita.strip().lower() in r.get("Indirizzo", "").lower():
-                p -= 2
-            return p
+            return risultati, ""
+        except Exception:
+            continue
 
-        if len(risultati) > 1:
-            risultati.sort(key=priorita_geo)
-
-        return risultati, ""
-    except Exception:
-        return risultato_vuoto, ""
+    return risultato_vuoto, ultimo_errore
 
 
 # ==========================================
@@ -2321,7 +2418,7 @@ def cerca_con_gemini_google_search(
         }
 
         trovato_qualcosa = any(
-            [risultato["email"], risultato["telefono"], risultato["sito_web"], risultato["pec"]]
+            [risultato["email"], risultato["telefono"], risultato["sito_web"], risultato["pec"], risultato["piva"]]
         )
         stato = "OK (contatti trovati su Google)" if trovato_qualcosa else "OK (nessun contatto extra trovato)"
         return risultato, "", stato
@@ -2347,6 +2444,8 @@ def cerca_piva_cf_fallback(
         queries.append(f'"{cf_noto}" ({portali})')
     if not ha_chiave_nota and nome_breve:
         queries.append(f"{nome_breve} {citta} ({portali})".strip())
+        # Query libera di riserva (utile per Fondazioni e quando DDG limita le query site:)
+        queries.append(f'"{nome_breve}" ("partita iva" OR "p.iva" OR "codice fiscale") {citta}'.strip())
 
     miglior_candidato = None
 
@@ -2362,7 +2461,10 @@ def cerca_piva_cf_fallback(
             )
             if ha_chiave_nota and not match_fisc:
                 continue
-            if not ha_chiave_nota and not nomi_corrispondono_stretto(nome_azienda, titolo):
+            if not ha_chiave_nota and not (
+                nomi_corrispondono_stretto(nome_azienda, titolo)
+                or nome_breve.lower() in snippet.lower()
+            ):
                 continue
 
             pive, cfs = estrai_dati_fiscali_da_testo(snippet)
@@ -2378,8 +2480,10 @@ def cerca_piva_cf_fallback(
             score = calcola_concordanza_indirizzo(snippet, indirizzo, cap, citta)
             if match_fisc:
                 score += 12
+            if nomi_corrispondono_stretto(nome_azienda, titolo):
+                score += 4
 
-            if not match_fisc and score < 2:
+            if not match_fisc and (citta or cap or indirizzo) and score < 2:
                 continue
 
             if miglior_candidato is None or score > miglior_candidato[0]:
@@ -2939,7 +3043,10 @@ def esegui_ricerca_background(
 
                 if not piva_finale and pive_sito and (match_fiscale_sito or not cf_noto):
                     piva_finale = seleziona_migliore(pive_sito)
-                    cf_finale = cf_finale or (seleziona_migliore(cf_sito) if cf_sito else piva_finale)
+                if not cf_finale and cf_sito:
+                    cf_finale = seleziona_migliore(cf_sito)
+                if not piva_finale and cf_finale and valida_piva(cf_finale) and "fondazione" not in azienda.lower():
+                    piva_finale = cf_finale
 
                 # LIVELLO 3: DuckDuckGo Web
                 pive_web = []
@@ -2996,8 +3103,9 @@ def esegui_ricerca_background(
                     dati_maps.get("Telefono_Maps") or tel_sito or dati_maps.get("Telefono_Web")
                 )
                 ancora_manca_sito = not sito_verificato
+                ancora_manca_piva = not piva_finale
 
-                if ancora_manca_email or ancora_manca_tel or ancora_manca_sito:
+                if ancora_manca_email or ancora_manca_tel or ancora_manca_sito or ancora_manca_piva:
                     if not usa_gemini_search or not gemini_api_key:
                         stato_google_search = "Disattivato"
                     elif gemini_disabilitato_errore:
